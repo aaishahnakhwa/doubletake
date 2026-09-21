@@ -1,0 +1,12 @@
+# Godot 4+ specific ignores
+.godot/
+/android/.build_version
+/android/build/.gradle/
+/android/build/build/
+/android/build/libs/
+/android/build/src/main/assets/
+/android/build/local.properties
+/builds/
+/server/logs/
+__pycache__/
+/eos_credentials.cfg
