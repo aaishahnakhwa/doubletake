@@ -22,6 +22,12 @@ const SABOTAGE_STATIONS := {
 	"lanterns": "Lodge Lantern"
 }
 
+const CampBellScript := preload("res://scripts/camp_bell.gd")
+const EMERGENCY_BUTTON_TEXTURE := preload("res://assets/phase5/camp_bell_post.png")
+const EMERGENCY_BUTTON_PIXEL := Vector2(630, 515)
+const EMERGENCY_BUTTON_POS := EMERGENCY_BUTTON_PIXEL * ART_SCALE
+const EMERGENCY_BUTTON_RADIUS := 145.0
+
 const ROOMS := [
 	{"name": "Gate Office", "rect": Rect2(176, 170, 128, 134), "door_side": "bottom", "door_at": 234.0},
 	{"name": "Cabin A", "rect": Rect2(307, 85, 123, 146), "door_side": "bottom", "door_at": 388.0},
@@ -88,58 +94,52 @@ const ROUTE_PIXELS := [
 
 # Only solid furniture receives collision. Small decorative art stays visual.
 const FURNITURE := [
-	Rect2(332, 130, 23, 54), Rect2(383, 124, 30, 60),
-	Rect2(468, 125, 29, 60), Rect2(524, 125, 28, 60),
-	Rect2(605, 125, 29, 60), Rect2(662, 125, 29, 60),
-	Rect2(823, 134, 76, 51), Rect2(929, 134, 76, 51),
-	Rect2(823, 199, 76, 48), Rect2(929, 199, 76, 48),
-	Rect2(1169, 209, 73, 42), Rect2(1388, 293, 54, 91),
-	Rect2(160, 443, 61, 40), Rect2(204, 539, 75, 31),
-	Rect2(1187, 453, 42, 54), Rect2(1325, 453, 45, 60),
-	Rect2(750, 696, 63, 41), Rect2(845, 740, 50, 47)
+	Rect2(335, 134, 18, 46), Rect2(386, 128, 24, 52),
+	Rect2(471, 129, 23, 52), Rect2(527, 129, 22, 52),
+	Rect2(608, 129, 23, 52), Rect2(665, 129, 23, 52),
+	Rect2(828, 138, 66, 42), Rect2(934, 138, 66, 42),
+	Rect2(828, 203, 66, 40), Rect2(934, 203, 66, 40),
+	Rect2(1174, 213, 63, 34), Rect2(1393, 298, 44, 81),
+	Rect2(165, 448, 51, 30), Rect2(209, 544, 65, 21),
+	Rect2(1192, 458, 32, 44), Rect2(1330, 458, 35, 50),
+	Rect2(755, 701, 53, 31), Rect2(850, 745, 40, 37)
 ]
 
-const FOREST_BLOCKS := [
-	Rect2(0, 0, 1536, 58), Rect2(0, 955, 1536, 69),
-	Rect2(0, 385, 60, 265), Rect2(465, 923, 140, 75)
-]
+const FOREST_BLOCKS := []
 
-# Each circle follows a visible tree crown or dense grove on camp_map_3.
-# The older broad rectangles hid walkable dirt paths between these trees.
+# Compact tree trunk collision points replace huge foliage crown circles.
+# This opens up ground dirt paths while keeping tree bases solid.
 const TREE_CROWNS := [
-	[Vector2(109, 44), 35.0], [Vector2(215, 61), 32.0], [Vector2(300, 54), 28.0],
-	[Vector2(541, 40), 33.0], [Vector2(681, 48), 28.0], [Vector2(1120, 48), 34.0],
-	[Vector2(1238, 58), 31.0], [Vector2(1361, 92), 31.0],
-	[Vector2(270, 143), 26.0], [Vector2(736, 246), 27.0],
-	[Vector2(461, 294), 27.0], [Vector2(578, 309), 24.0],
-	[Vector2(431, 421), 27.0], [Vector2(539, 394), 20.0],
-	[Vector2(948, 411), 28.0], [Vector2(1081, 411), 29.0],
-	[Vector2(1153, 399), 25.0],
-	[Vector2(1278, 402), 26.0],
-	[Vector2(424, 540), 27.0], [Vector2(491, 540), 28.0],
-	[Vector2(568, 548), 24.0],
-	[Vector2(456, 633), 28.0], [Vector2(545, 639), 27.0],
-	[Vector2(667, 636), 27.0], [Vector2(856, 630), 28.0],
-	[Vector2(910, 576), 21.0],
-	[Vector2(966, 587), 27.0], [Vector2(1000, 559), 27.0],
-	[Vector2(1080, 625), 25.0], [Vector2(1190, 641), 26.0],
-	[Vector2(1344, 701), 28.0], [Vector2(493, 773), 28.0],
-	[Vector2(1297, 860), 25.0],
-	[Vector2(1005, 879), 25.0], [Vector2(1260, 882), 24.0],
-	[Vector2(737, 929), 26.0], [Vector2(858, 934), 25.0],
-	[Vector2(1279, 916), 28.0],
-	[Vector2(1378, 922), 29.0], [Vector2(1452, 965), 31.0]
+	[Vector2(109, 44), 8.0], [Vector2(215, 61), 8.0], [Vector2(300, 54), 8.0],
+	[Vector2(541, 40), 8.0], [Vector2(681, 48), 8.0], [Vector2(1120, 48), 8.0],
+	[Vector2(1238, 58), 8.0], [Vector2(1361, 92), 8.0],
+	[Vector2(270, 143), 8.0], [Vector2(736, 246), 8.0],
+	[Vector2(461, 294), 8.0], [Vector2(578, 309), 8.0],
+	[Vector2(431, 421), 8.0], [Vector2(539, 394), 8.0],
+	[Vector2(948, 411), 8.0], [Vector2(1081, 411), 8.0],
+	[Vector2(1153, 399), 8.0], [Vector2(1278, 402), 8.0],
+	[Vector2(424, 540), 8.0], [Vector2(491, 540), 8.0],
+	[Vector2(568, 548), 8.0], [Vector2(456, 633), 8.0],
+	[Vector2(545, 639), 8.0], [Vector2(667, 636), 8.0],
+	[Vector2(856, 630), 8.0], [Vector2(910, 576), 8.0],
+	[Vector2(966, 587), 8.0], [Vector2(1000, 559), 8.0],
+	[Vector2(1080, 625), 8.0], [Vector2(1190, 641), 8.0],
+	[Vector2(1344, 701), 8.0], [Vector2(493, 773), 8.0],
+	[Vector2(1297, 860), 8.0], [Vector2(1005, 879), 8.0],
+	[Vector2(1260, 882), 8.0], [Vector2(737, 929), 8.0],
+	[Vector2(858, 934), 8.0], [Vector2(1279, 916), 8.0],
+	[Vector2(1378, 922), 8.0], [Vector2(1452, 965), 8.0]
 ]
 
 const LOG_SEGMENTS := [
-	[Vector2(689, 455), Vector2(726, 430), 19.0],
-	[Vector2(799, 431), Vector2(837, 458), 19.0],
-	[Vector2(662, 499), Vector2(673, 547), 19.0],
-	[Vector2(853, 499), Vector2(843, 548), 19.0],
-	[Vector2(695, 564), Vector2(729, 583), 19.0],
-	[Vector2(788, 583), Vector2(823, 564), 19.0],
-	[Vector2(507, 324), Vector2(560, 349), 20.0],
-	[Vector2(970, 589), Vector2(1028, 615), 20.0]
+	[Vector2(689, 455), Vector2(726, 430), 10.0],
+	[Vector2(799, 431), Vector2(837, 458), 10.0],
+	[Vector2(662, 499), Vector2(673, 547), 10.0],
+	[Vector2(853, 499), Vector2(843, 548), 10.0],
+	[Vector2(695, 564), Vector2(729, 583), 10.0],
+	[Vector2(788, 583), Vector2(823, 564), 10.0],
+	[Vector2(507, 324), Vector2(560, 349), 10.0],
+	[Vector2(970, 589), Vector2(1028, 615), 10.0]
 ]
 
 # Wooden dock boards and bridges override the blue-water pixel mask.
@@ -176,6 +176,7 @@ var active_sabotage_ids: Dictionary = {}
 var killer_sabotage_ids: Dictionary = {}
 var task_markers_enabled := false
 var task_marker_time := 0.0
+var bell: Node2D
 
 
 func _ready() -> void:
@@ -196,6 +197,13 @@ func _ready() -> void:
 		var station: Dictionary = source.duplicate()
 		station["at"] = source["at"] * ART_SCALE
 		stations.append(station)
+	var button_stump := CampBellScript.new()
+	button_stump.name = "EmergencyMeetingStump"
+	button_stump.scale = Vector2(0.60, 0.60)
+	button_stump.global_position = EMERGENCY_BUTTON_POS
+	button_stump.z_index = 0
+	add_child(button_stump)
+	bell = button_stump
 	_build_collisions()
 	_build_navigation()
 	queue_redraw()
@@ -226,6 +234,7 @@ func _build_collisions() -> void:
 		_add_segment_collider(segment[0], segment[1], 13.0)
 	_add_water_collisions()
 	_add_circle_collider(Vector2(758, 503), 32.0)
+	_add_circle_collider(EMERGENCY_BUTTON_PIXEL, 24.0)
 
 
 func _add_water_collisions() -> void:
@@ -367,7 +376,7 @@ func _build_navigation() -> void:
 
 
 func _blocked_for_camper(source_point: Vector2) -> bool:
-	const CLEARANCE := 10.0
+	const CLEARANCE := 3.0
 	for rect in solid_rects:
 		if rect.grow(CLEARANCE).has_point(source_point):
 			return true
@@ -447,6 +456,11 @@ func _draw() -> void:
 			draw_texture_rect(SABOTAGE_TEXTURES[sabotage_id], Rect2(at - Vector2(38, 38), Vector2(76, 76)), false)
 			var warning_font := ThemeDB.fallback_font
 			draw_string(warning_font, at + Vector2(-52, -48 - pulse), "SABOTAGE", HORIZONTAL_ALIGNMENT_CENTER, 104, 15, Color("#ffcf70"))
+	# Draw Emergency Button interaction ring
+	var btn_pulse := 2.0 + sin(task_marker_time * TAU) * 2.5
+	draw_arc(EMERGENCY_BUTTON_POS, 68.0 + btn_pulse, 0.0, TAU, 32, Color("#e63946", 0.82), 3.0, true)
+	var e_font := ThemeDB.fallback_font
+	draw_string(e_font, EMERGENCY_BUTTON_POS + Vector2(-70, 84), "CAMP BELL", HORIZONTAL_ALIGNMENT_CENTER, 140, 15, Color("#ffd166"))
 
 
 func set_active_task_ids(ids: Array[String]) -> void:
@@ -523,3 +537,8 @@ func get_contextual_elimination(killer_at: Vector2, victim_at: Vector2, radius: 
 
 func get_spawn_point() -> Vector2:
 	return Vector2(760, 606) * ART_SCALE
+
+
+func is_near_emergency_button(player_pos: Vector2) -> bool:
+	return player_pos.distance_to(EMERGENCY_BUTTON_POS) <= EMERGENCY_BUTTON_RADIUS
+

@@ -39,6 +39,8 @@ func _ready() -> void:
 	session.match_started.connect(_on_match_started)
 	session.snapshot_received.connect(_on_test_snapshot)
 	session.color_change_failed.connect(_on_color_change_failed)
+	session.match_returned_to_lobby.connect(_on_match_returned_to_lobby)
+	session.session_disconnected.connect(_on_session_disconnected)
 	if cli.has("server"):
 		_start_dedicated_server()
 		return
@@ -122,14 +124,11 @@ func _start_cli_lan_host() -> void:
 
 func _build_client_ui() -> void:
 	lobby_ui = LobbyUIScript.new()
-	lobby_ui.allow_test_bots = OS.is_debug_build() or OS.has_feature("camper_test") or cli.has("enable-test-bots")
-	# This is intentionally available in the shareable playtest builds: whoever
-	# creates the room can deliberately assign the Killer before the match starts.
-	lobby_ui.allow_role_picker = OS.has_feature("camper_test") or cli.has("enable-role-picker")
-	# The normal build always uses the same EOS room-code flow. Local networking
-	# remains available only as an explicit diagnostic launch option.
-	lobby_ui.allow_lan_test = cli.has("enable-lan-test")
+	lobby_ui.allow_test_bots = true
+	lobby_ui.allow_role_picker = true
+	lobby_ui.allow_lan_test = true
 	add_child(lobby_ui)
+	lobby_ui.setup_chat(session)
 	lobby_ui.create_requested.connect(_create_room)
 	lobby_ui.create_lan_requested.connect(_create_lan_room)
 	lobby_ui.join_requested.connect(_join_room)
@@ -139,6 +138,7 @@ func _build_client_ui() -> void:
 	lobby_ui.settings_requested.connect(session.update_settings)
 	lobby_ui.test_bots_requested.connect(session.set_test_bots)
 	lobby_ui.color_requested.connect(session.request_color)
+	lobby_ui.customization_requested.connect(session.set_customization)
 	lobby_ui.leave_requested.connect(_leave_lobby)
 	lobby_ui.quit_requested.connect(_quit_game)
 	lobby_ui.offline_preview_requested.connect(_open_offline_preview)
@@ -162,7 +162,7 @@ func _create_lan_room(display_name: String, color_index: int) -> void:
 	ProjectSettings.set_setting("double_take/player_name", pending_name)
 	var address := _best_lan_address()
 	var player_id := "lan-host-" + str(Time.get_ticks_msec()) + "-" + str(randi_range(1000, 9999))
-	var error: int = session.start_lan_host(address, player_id, pending_name, pending_color, 4)
+	var error: int = session.start_lan_host(address, player_id, pending_name, pending_color, 2)
 	if error != OK:
 		_on_eos_lobby_failed("Could not create the Local Wi-Fi lobby. Close other hosts and try again.")
 
@@ -214,6 +214,15 @@ func _on_join_succeeded(state: Dictionary) -> void:
 
 func _on_join_failed(message: String) -> void:
 	push_error(message)
+	if session.connection_failure_emitted:
+		# A terminal transport failure (during first join or after reconnects are
+		# exhausted) returns to the same simple code-entry screen and releases EOS.
+		session.disconnect_session()
+		if is_instance_valid(lobby_ui):
+			lobby_ui.show_menu(message)
+		else:
+			get_tree().quit(2)
+		return
 	if is_instance_valid(lobby_ui):
 		lobby_ui.set_status(message, true)
 	else:
@@ -247,12 +256,36 @@ func _on_match_started(role: String, state: Dictionary) -> void:
 		return
 	if is_instance_valid(lobby_ui):
 		lobby_ui.visible = false
+	var old_game := get_node_or_null("MultiplayerCamp")
+	if is_instance_valid(old_game):
+		old_game.queue_free()
 	await _show_role_reveal(role)
 	var game := MultiplayerGameScript.new()
 	game.name = "MultiplayerCamp"
 	game.session = session
 	game.initial_state = state
 	add_child(game)
+
+
+func _on_match_returned_to_lobby() -> void:
+	var old_game := get_node_or_null("MultiplayerCamp")
+	if is_instance_valid(old_game):
+		old_game.queue_free()
+	if is_instance_valid(lobby_ui):
+		lobby_ui.visible = true
+		lobby_ui.update_lobby(session.current_lobby_state)
+		lobby_ui.set_status("Returned to lobby.")
+
+
+func _on_session_disconnected() -> void:
+	var old_game := get_node_or_null("MultiplayerCamp")
+	if is_instance_valid(old_game):
+		old_game.queue_free()
+	if is_instance_valid(eos_lobby):
+		eos_lobby.leave_room()
+	if is_instance_valid(lobby_ui):
+		lobby_ui.visible = true
+		lobby_ui.show_menu("Left the room.")
 
 
 func _physics_process(_delta: float) -> void:
@@ -296,11 +329,10 @@ func _show_role_reveal(role: String) -> void:
 
 
 func _leave_lobby() -> void:
+	# disconnect_session emits the one player-departure event that owns both EOS
+	# lobby cleanup and the return to the menu. Keeping this single path prevents
+	# duplicate asynchronous leave calls.
 	session.disconnect_session()
-	if is_instance_valid(eos_lobby):
-		eos_lobby.leave_room()
-	if is_instance_valid(lobby_ui):
-		lobby_ui.show_menu("Left the lobby.")
 
 
 func _quit_game() -> void:

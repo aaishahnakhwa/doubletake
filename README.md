@@ -23,6 +23,7 @@ The self-contained multiplayer regression tests retain the local ENet test harne
 ```powershell
 python tools/test_phase2.py
 python tools/test_phase2_resilience.py
+godot --headless --path . --script res://tools/test_leave_and_auto_tasks.gd
 godot --headless --path . --script res://tools/test_phase3.gd
 godot --headless --path . --script res://tools/test_phase4.gd
 ```

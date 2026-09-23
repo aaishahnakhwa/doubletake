@@ -6,11 +6,13 @@ var walk_speed := 155.0
 
 
 func _ready() -> void:
+	add_to_group("campers")
 	collision_layer = 2
 	collision_mask = 1
 	var collider := CollisionShape2D.new()
 	var shape := CircleShape2D.new()
-	shape.radius = 18.0
+	shape.radius = 10.0
+	collider.position = Vector2(0.0, 14.0)
 	collider.shape = shape
 	add_child(collider)
 

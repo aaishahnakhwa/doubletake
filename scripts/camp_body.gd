@@ -20,7 +20,7 @@ var body_sprite: Sprite2D
 func _ready() -> void:
 	body_sprite = Sprite2D.new()
 	body_sprite.position = Vector2(0, 4)
-	body_sprite.scale = Vector2(0.60, 0.60)
+	body_sprite.scale = Vector2(0.48, 0.48)
 	add_child(body_sprite)
 	_refresh_sprite()
 
@@ -30,6 +30,10 @@ func setup(body: Dictionary) -> void:
 	var context: Dictionary = body.get("context", {})
 	context_name = str(context.get("name", "Close-range"))
 	reported = bool(body.get("reported", false))
+	if reported:
+		visible = false
+		queue_free()
+		return
 	color_variant = clampi(int(body.get("color", 0)), 0, BODY_TEXTURES.size() - 1)
 	_refresh_sprite()
 	queue_redraw()
@@ -43,7 +47,9 @@ func _refresh_sprite() -> void:
 
 
 func _draw() -> void:
-	var tint := Color("#6f8790", 0.82) if reported else Color("#e8a24d", 0.95)
+	if reported:
+		return
+	var tint := Color("#e8a24d", 0.95)
 	var font := ThemeDB.fallback_font
-	draw_string(font, Vector2(-72, -72), "REPORTED" if reported else "BODY", HORIZONTAL_ALIGNMENT_CENTER, 144, 16, tint)
-	draw_string(font, Vector2(-92, 78), victim_name + " - " + context_name, HORIZONTAL_ALIGNMENT_CENTER, 184, 13, Color("#fffbe7", 0.9))
+	draw_string(font, Vector2(-65, -46), "DEAD BODY", HORIZONTAL_ALIGNMENT_CENTER, 130, 14, tint)
+	draw_string(font, Vector2(-85, 56), victim_name + " - " + context_name, HORIZONTAL_ALIGNMENT_CENTER, 170, 12, Color("#fffbe7", 0.9))

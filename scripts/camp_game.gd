@@ -6,6 +6,7 @@ const HudScript = preload("res://scripts/camp_hud.gd")
 const VisibilityScript = preload("res://scripts/visibility_overlay.gd")
 const AtmosphereScript = preload("res://scripts/camp_atmosphere.gd")
 const DepthScript = preload("res://scripts/camp_depth.gd")
+const MeetingScreenScript = preload("res://scripts/meeting_screen.gd")
 
 const CAMPER_NAMES := ["Ayaan", "Riya", "Kabir", "Zoya", "Armaan", "Mira", "Dev", "Tara", "Noor"]
 const SPAWN_NODES := [8, 9, 10, 11, 12, 14, 15, 18, 20]
@@ -19,6 +20,7 @@ var hud: CanvasLayer
 var visibility: Node2D
 var atmosphere: Node2D
 var depth: Node2D
+var active_meeting: CanvasLayer
 var last_station_name := ""
 var rng := RandomNumberGenerator.new()
 
@@ -43,8 +45,11 @@ func _ready() -> void:
 	add_child(hud)
 	hud.set_zone_names(world.get_zone_names())
 	hud.inspect_requested.connect(_inspect_station)
+	hud.emergency_meeting_requested.connect(_start_emergency_sequence)
 	hud.player_count_delta.connect(_change_player_count)
 	hud.touch_direction_changed.connect(func(direction: Vector2) -> void: player.touch_direction = direction)
+	if is_instance_valid(world) and is_instance_valid(world.bell):
+		world.bell.bell_clicked.connect(_on_bell_clicked)
 	_set_player_count(4)
 	hud.show_toast("Explore camp. Inspect green markers!")
 
@@ -63,6 +68,8 @@ func _process(_delta: float) -> void:
 	if station_name != last_station_name:
 		last_station_name = station_name
 		hud.update_station(station)
+	var near_emergency: bool = bool(world.is_near_emergency_button(player.global_position)) and not is_instance_valid(active_meeting)
+	hud.set_nearby_emergency_button(near_emergency)
 
 
 func _unhandled_input(event: InputEvent) -> void:
@@ -154,8 +161,80 @@ func _advance_bot(bot: CharacterBody2D) -> void:
 
 
 func _inspect_station() -> void:
+	if is_instance_valid(active_meeting):
+		return
+	if world.is_near_emergency_button(player.global_position):
+		hud.show_emergency_confirm_dialog()
+		return
 	var station: Dictionary = world.get_nearest_station(player.global_position)
 	if station.is_empty():
 		return
 	hud.mark_zone(station["zone"])
 	hud.show_toast("Inspected %s • %s" % [station["name"], station["task"]])
+
+
+func _on_bell_clicked() -> void:
+	if is_instance_valid(active_meeting):
+		return
+	if world.is_near_emergency_button(player.global_position):
+		hud.show_emergency_confirm_dialog()
+	else:
+		hud.show_toast("Walk closer to the Camp Bell to ring it!")
+
+
+func _start_emergency_sequence() -> void:
+	if is_instance_valid(active_meeting):
+		return
+	if is_instance_valid(player):
+		player.input_locked = true
+		player.velocity = Vector2.ZERO
+	hud.show_ringing_bell_cinematic(1.2)
+	if is_instance_valid(world) and is_instance_valid(world.bell):
+		world.bell.ring(1.2)
+		world.bell.ring_finished.connect(_open_emergency_meeting, CONNECT_ONE_SHOT)
+	else:
+		get_tree().create_timer(1.2).timeout.connect(_open_emergency_meeting)
+
+
+func _open_emergency_meeting() -> void:
+	if is_instance_valid(active_meeting):
+		return
+	if is_instance_valid(player):
+		player.input_locked = true
+		player.velocity = Vector2.ZERO
+	var meeting_players: Array = []
+	meeting_players.append({
+		"player_id": "local",
+		"name": "You",
+		"color": 0,
+		"ghost": false,
+		"connected": true
+	})
+	for i in range(bots.size()):
+		var bot: CharacterBody2D = bots[i]
+		meeting_players.append({
+			"player_id": "bot_%d" % i,
+			"name": bot.display_name,
+			"color": bot.sprite_variant,
+			"ghost": false,
+			"connected": true
+		})
+	var meeting_data := {
+		"type": "emergency",
+		"caller_id": "local",
+		"caller_name": "You",
+		"caller_color": 0,
+		"victim_id": "",
+		"victim_name": "",
+		"players": meeting_players
+	}
+	active_meeting = MeetingScreenScript.new()
+	active_meeting.setup(meeting_data, "local", true)
+	active_meeting.meeting_dismissed.connect(func() -> void:
+		active_meeting = null
+		if is_instance_valid(player):
+			player.input_locked = false
+		hud.show_toast("Meeting dismissed. Returning to camp.")
+	)
+	add_child(active_meeting)
+

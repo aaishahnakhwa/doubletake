@@ -38,7 +38,8 @@ func _run() -> void:
 				push_error("Contextual prop did not load for " + context_id)
 				quit(1)
 				return
-		await create_timer(2.65).timeout
+		await cinematic.finished
+		await process_frame
 		if is_instance_valid(cinematic):
 			push_error("Kill cinematic did not release the gameplay overlay for " + context_id)
 			quit(1)

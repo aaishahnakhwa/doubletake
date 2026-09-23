@@ -6,6 +6,7 @@
 /android/build/libs/
 /android/build/src/main/assets/
 /android/build/local.properties
+/android/signing/
 /builds/
 /server/logs/
 __pycache__/

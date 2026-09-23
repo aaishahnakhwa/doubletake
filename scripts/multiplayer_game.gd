@@ -10,6 +10,8 @@ const TaskMinigameScript = preload("res://scripts/task_minigame.gd")
 const BodyScript = preload("res://scripts/camp_body.gd")
 const KillEffectScript = preload("res://scripts/kill_effect.gd")
 const KillCinematicScript = preload("res://scripts/kill_cinematic.gd")
+const MeetingScreenScript = preload("res://scripts/meeting_screen.gd")
+const EndGameScreenScript = preload("res://scripts/end_game_screen.gd")
 
 var session: Node
 var initial_state: Dictionary = {}
@@ -25,6 +27,8 @@ var last_station_name := ""
 var current_minigame: CanvasLayer
 var current_sabotage_id := ""
 var active_kill_cinematic: CanvasLayer
+var active_meeting_screen: CanvasLayer
+var active_end_game_screen: CanvasLayer
 var task_state: Dictionary = {}
 var phase4_state: Dictionary = {}
 var bodies_by_id: Dictionary = {}
@@ -64,11 +68,19 @@ func _ready() -> void:
 	session.task_action_failed.connect(func(message: String) -> void: hud.show_toast(message))
 	session.phase4_state_received.connect(_on_phase4_state)
 	session.phase4_action_failed.connect(func(message: String) -> void: hud.show_toast(message))
-	session.body_reported.connect(func(_body: Dictionary) -> void: hud.show_toast("Body report confirmed. Meetings begin in Phase 5."))
+	session.body_reported.connect(func(_body: Dictionary) -> void: hud.show_toast("Body reported! Meeting called."))
+	session.meeting_started.connect(_on_meeting_started)
+	session.meeting_ended.connect(_on_meeting_ended)
 	hud.kill_requested.connect(session.request_kill)
 	hud.sabotage_requested.connect(_begin_sabotage_minigame)
 	hud.repair_requested.connect(session.request_repair)
 	hud.body_report_requested.connect(session.report_nearby_body)
+	hud.emergency_meeting_requested.connect(_on_emergency_meeting_requested)
+	hud.is_host = session.is_server
+	hud.leave_match_requested.connect(session.disconnect_session)
+	hud.return_to_lobby_requested.connect(session.request_return_to_lobby)
+	if is_instance_valid(world) and is_instance_valid(world.bell):
+		world.bell.bell_clicked.connect(_on_bell_clicked)
 	session.match_ended.connect(_on_match_ended)
 	_apply_phase4_visuals(false)
 
@@ -88,6 +100,7 @@ func _process(delta: float) -> void:
 		last_station_name = station_name
 		hud.update_station(station)
 	hud.set_nearby_body(_nearby_unreported_body())
+	hud.set_nearby_emergency_button(_can_call_emergency_meeting())
 	for player_id: String in actor_by_id:
 		if player_id == session.local_player_id or not target_positions.has(player_id):
 			continue
@@ -119,14 +132,20 @@ func _unhandled_input(event: InputEvent) -> void:
 
 
 func _spawn_players() -> void:
+	var pace_mult := float(initial_state.get("settings", {}).get("walking_pace", 1.0))
 	for record: Dictionary in initial_state.get("players", []):
 		var actor: CharacterBody2D = ActorScript.new()
 		var player_id: String = str(record["player_id"])
 		actor.name = "Camper_" + player_id
 		actor.display_name = str(record["name"])
 		actor.sprite_variant = clampi(int(record["color"]), 0, 5)
+		actor.look_id = str(record.get("look", record.get("hat", "classic")))
+		actor.hat_id = actor.look_id
+		actor.outfit_id = str(record.get("outfit", "none"))
+		actor.set_customization(actor.look_id, actor.outfit_id)
 		actor.is_local = player_id == session.local_player_id
 		actor.global_position = record["position"]
+		actor.speed = 155.0 * pace_mult
 		actors.add_child(actor)
 		actor_by_id[player_id] = actor
 		target_positions[player_id] = actor.global_position
@@ -151,10 +170,13 @@ func _on_snapshot(snapshot: Dictionary) -> void:
 
 
 func _inspect_station() -> void:
-	if not is_instance_valid(player) or is_instance_valid(current_minigame):
+	if not is_instance_valid(player) or is_instance_valid(current_minigame) or is_instance_valid(active_meeting_screen):
 		return
 	if _nearby_unreported_body():
 		session.report_nearby_body()
+		return
+	if _can_call_emergency_meeting():
+		hud.show_emergency_confirm_dialog()
 		return
 	var station: Dictionary = world.get_nearest_station(player.global_position)
 	if station.is_empty():
@@ -257,7 +279,8 @@ func _apply_phase4_visuals(play_new_cinematics: bool = true) -> void:
 		actor.set_ghost(ghost)
 		# Only the eliminated player sees their own movable ghost. Everyone else
 		# sees the body marker instead of a standing duplicate.
-		actor.visible = not ghost or player_id == session.local_player_id
+		if not actor.is_performing_action:
+			actor.visible = not ghost or player_id == session.local_player_id
 	var wanted := {}
 	for body: Dictionary in phase4_state.get("bodies", []):
 		var victim_id := str(body.get("player_id", ""))
@@ -273,6 +296,20 @@ func _apply_phase4_visuals(play_new_cinematics: bool = true) -> void:
 			var effect := KillEffectScript.new()
 			effect.global_position = marker.global_position
 			actors.add_child(effect)
+
+			# In-world map kill presentation: killer strikes and victim reacts directly on the map
+			var killer_id := str(body.get("killer_id", ""))
+			var killer_actor: CharacterBody2D = actor_by_id.get(killer_id)
+			var victim_actor: CharacterBody2D = actor_by_id.get(victim_id)
+			if is_instance_valid(killer_actor):
+				killer_actor.play_kill_strike(marker.global_position)
+				if killer_id == session.local_player_id:
+					killer_actor.shake_camera(7.0, 0.25)
+					hud.show_toast("Eliminated %s!" % str(body.get("name", "Camper")))
+			if is_instance_valid(victim_actor) and victim_id != session.local_player_id:
+				var k_pos: Vector2 = killer_actor.global_position if is_instance_valid(killer_actor) else marker.global_position
+				victim_actor.play_death_reaction(k_pos)
+
 			if play_new_cinematics:
 				_start_kill_cinematic(body)
 		var marker = bodies_by_id[victim_id]
@@ -285,8 +322,9 @@ func _apply_phase4_visuals(play_new_cinematics: bool = true) -> void:
 
 func _start_kill_cinematic(body: Dictionary) -> void:
 	var victim_id := str(body.get("player_id", ""))
-	var killer_id := str(body.get("killer_id", ""))
-	if session.local_player_id != killer_id and session.local_player_id != victim_id:
+	# ONLY the victim camper receives the full-screen cinematic overlay.
+	# The killer and bystanders stay on the map with the in-world strike and death reaction.
+	if session.local_player_id != victim_id:
 		return
 	if is_instance_valid(active_kill_cinematic):
 		return
@@ -342,14 +380,15 @@ func _is_killer_objective(sabotage_id: String) -> bool:
 
 func _refresh_task_markers() -> void:
 	var incomplete_ids: Array[String] = []
+	var empty_ids: Array[String] = []
 	if session.local_role == "Killer":
 		for objective: Dictionary in phase4_state.get("objectives", []):
 			if not bool(objective.get("completed", false)):
 				incomplete_ids.append(str(objective.get("id", "")))
-		world.set_active_task_ids([])
+		world.set_active_task_ids(empty_ids)
 		world.set_killer_sabotage_ids(incomplete_ids)
 		return
-	world.set_killer_sabotage_ids([])
+	world.set_killer_sabotage_ids(empty_ids)
 	for assignment: Dictionary in task_state.get("tasks", []):
 		if not bool(assignment.get("completed", false)):
 			incomplete_ids.append(str(assignment.get("id", "")))
@@ -364,24 +403,97 @@ func _refresh_sabotage_markers() -> void:
 	world.set_active_sabotage_ids(active_ids)
 
 
-func _on_match_ended(winner: String, reason: String) -> void:
+func _on_match_ended(winner: String, reason: String, outcome: Dictionary = {}) -> void:
+	if is_instance_valid(current_minigame):
+		current_minigame.queue_free()
+		current_minigame = null
+		current_sabotage_id = ""
+	if is_instance_valid(active_meeting_screen):
+		active_meeting_screen.queue_free()
+		active_meeting_screen = null
 	if is_instance_valid(player):
 		player.input_locked = true
-	var result := CanvasLayer.new()
-	result.layer = 60
-	add_child(result)
-	var backdrop := ColorRect.new()
-	backdrop.color = Color("#081918", 0.93)
-	backdrop.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-	result.add_child(backdrop)
-	var label := Label.new()
-	label.text = "%s WIN\n\n%s" % [winner.to_upper(), reason]
-	label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-	label.add_theme_font_size_override("font_size", 38)
-	label.add_theme_color_override("font_color", Color("#a7c957") if winner == "Campers" else Color("#e63946"))
-	label.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-	result.add_child(label)
+		player.touch_direction = Vector2.ZERO
+
+	if is_instance_valid(active_end_game_screen):
+		active_end_game_screen.queue_free()
+
+	var is_host := false
+	for p: Dictionary in initial_state.get("players", []):
+		if str(p.get("player_id", "")) == session.local_player_id:
+			is_host = bool(p.get("host", false))
+			break
+	if not is_host and session.is_server:
+		is_host = true
+
+	active_end_game_screen = EndGameScreenScript.new()
+	active_end_game_screen.setup(outcome, session.local_player_id, is_host)
+	active_end_game_screen.play_again_pressed.connect(session.request_rematch)
+	active_end_game_screen.return_to_lobby_pressed.connect(session.request_return_to_lobby)
+	active_end_game_screen.leave_room_pressed.connect(session.disconnect_session)
+	active_end_game_screen.rematch_ready_toggled.connect(session.set_rematch_ready)
+	add_child(active_end_game_screen)
+
+
+func _can_call_emergency_meeting() -> bool:
+	if not is_instance_valid(player) or is_instance_valid(active_meeting_screen):
+		return false
+	if bool(phase4_state.get("ghost", false)):
+		return false
+	return world.is_near_emergency_button(player.global_position)
+
+
+func _on_bell_clicked() -> void:
+	if not is_instance_valid(player) or is_instance_valid(active_meeting_screen) or is_instance_valid(current_minigame):
+		return
+	if _can_call_emergency_meeting():
+		hud.show_emergency_confirm_dialog()
+	else:
+		hud.show_toast("Walk closer to the Camp Bell to ring it!")
+
+
+func _on_emergency_meeting_requested() -> void:
+	hud.show_ringing_bell_cinematic(1.2)
+	if is_instance_valid(world) and is_instance_valid(world.bell):
+		world.bell.ring(1.2)
+	session.request_emergency_meeting()
+
+
+func _on_meeting_started(meeting: Dictionary) -> void:
+	if is_instance_valid(current_minigame):
+		current_minigame.queue_free()
+		current_minigame = null
+		current_sabotage_id = ""
+	if is_instance_valid(active_kill_cinematic):
+		active_kill_cinematic.queue_free()
+		active_kill_cinematic = null
+	if is_instance_valid(player):
+		player.input_locked = true
+		player.touch_direction = Vector2.ZERO
+	if str(meeting.get("type", "")) == "emergency":
+		hud.show_ringing_bell_cinematic(1.2)
+		if is_instance_valid(world) and is_instance_valid(world.bell):
+			world.bell.ring(1.2)
+	if is_instance_valid(active_meeting_screen):
+		active_meeting_screen.queue_free()
+	active_meeting_screen = MeetingScreenScript.new()
+	active_meeting_screen.setup(meeting, session.local_player_id, session.is_server, session)
+	active_meeting_screen.vote_cast.connect(session.cast_vote)
+	active_meeting_screen.meeting_dismissed.connect(session.request_end_meeting)
+	active_meeting_screen.leave_match_requested.connect(session.disconnect_session)
+	active_meeting_screen.return_to_lobby_requested.connect(session.request_return_to_lobby)
+	session.player_voted.connect(active_meeting_screen.set_player_voted)
+	session.voting_results_received.connect(active_meeting_screen.show_voting_results)
+	add_child(active_meeting_screen)
+
+
+func _on_meeting_ended() -> void:
+	if is_instance_valid(active_meeting_screen):
+		active_meeting_screen.queue_free()
+		active_meeting_screen = null
+	if is_instance_valid(player):
+		player.input_locked = false
+	hud.show_toast("Meeting ended. Returning to camp.")
 
 
 func _bind_controls() -> void:

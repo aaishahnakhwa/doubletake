@@ -14,26 +14,51 @@ const ROOM_CODE_ATTRIBUTE := "double_take_code"
 const SOCKET_ID := "DoubleTakeP2PV1"
 const CODE_ALPHABET := "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 const MAX_PLAYERS := 6
+const MAX_JOIN_RETRIES := 3
+const FAIL_SAFE_TIMEOUT_SECONDS := 16.0
+const P2P_HANDSHAKE_GUARD_SECONDS := 6.0
 
 var current_lobby: HLobby
 var session: Node
 var eos_ready := false
 var membership_refresh_active := false
+var operation_active := false
+var leaving_lobby := false
+
+var _join_operation_id := 0
 
 
 func create_room(network_session: Node, display_name: String, color_index: int) -> void:
-	session = network_session
+	if operation_active or leaving_lobby:
+		status_changed.emit("Multiplayer setup is already in progress.")
+		return
+	_join_operation_id += 1
+	var op_id := _join_operation_id
+	operation_active = true
+	_attach_session(network_session)
 	if not await _ensure_signed_in(display_name):
 		return
+	if op_id != _join_operation_id:
+		return
+	if current_lobby != null:
+		await leave_room()
+		operation_active = true
+		if op_id != _join_operation_id:
+			return
+	_start_fail_safe_timeout(op_id, FAIL_SAFE_TIMEOUT_SECONDS)
 	status_changed.emit("Creating private internet lobby…")
 	var options := EOS.Lobby.CreateLobbyOptions.new()
 	options.bucket_id = BUCKET_ID
 	options.max_lobby_members = MAX_PLAYERS
-	options.disable_host_migration = false
+	# The room owner is also the authoritative gameplay host. Do not leave a
+	# discoverable but unusable room behind if that host exits or crashes.
+	options.disable_host_migration = true
 	options.permission_level = EOS.Lobby.LobbyPermissionLevel.PublicAdvertised
-	options.presence_enabled = false
+	options.presence_enabled = true
 	options.allow_invites = false
 	current_lobby = await HLobbies.create_lobby_async(options)
+	if op_id != _join_operation_id:
+		return
 	if current_lobby == null:
 		_failed("Could not create the internet lobby.")
 		return
@@ -42,10 +67,13 @@ func create_room(network_session: Node, display_name: String, color_index: int) 
 	current_lobby.add_current_member_attribute("name", display_name)
 	current_lobby.add_current_member_attribute("color", clampi(color_index, 0, 5))
 	if not await current_lobby.update_async():
-		_failed("Could not publish the private room code.")
+		if op_id == _join_operation_id:
+			_failed("Could not publish the private room code.")
+		return
+	if op_id != _join_operation_id:
 		return
 	_watch_lobby()
-	var connection_error: int = session.start_eos_host(code, HAuth.product_user_id, display_name, color_index, _member_ids())
+	var connection_error: int = session.start_eos_host(code, HAuth.product_user_id, display_name, color_index, _member_ids(), 2)
 	if connection_error != OK:
 		_failed("Could not open the P2P game host: " + error_string(connection_error))
 		return
@@ -54,58 +82,213 @@ func create_room(network_session: Node, display_name: String, color_index: int) 
 
 
 func join_room(network_session: Node, code: String, display_name: String, color_index: int) -> void:
-	session = network_session
+	if operation_active or leaving_lobby:
+		status_changed.emit("A room connection is already in progress.")
+		return
+	_join_operation_id += 1
+	var op_id := _join_operation_id
+	operation_active = true
+	_attach_session(network_session)
 	var clean_code := code.strip_edges().to_upper()
 	if clean_code.length() != 6:
 		_failed("Enter the complete six-character room code.")
 		return
 	if not await _ensure_signed_in(display_name):
 		return
+	if op_id != _join_operation_id:
+		return
+	if current_lobby != null:
+		await leave_room()
+		operation_active = true
+		if op_id != _join_operation_id:
+			return
+	_start_fail_safe_timeout(op_id, FAIL_SAFE_TIMEOUT_SECONDS)
+	_execute_join_with_retry(op_id, clean_code, display_name, color_index, 1)
+
+
+func _execute_join_with_retry(op_id: int, clean_code: String, display_name: String, color_index: int, attempt: int) -> void:
+	if op_id != _join_operation_id or not operation_active:
+		return
+	if attempt > MAX_JOIN_RETRIES:
+		_failed("Could not join room %s after %d retries. Room may be full or closed." % [clean_code, MAX_JOIN_RETRIES])
+		return
+	if attempt > 1:
+		status_changed.emit("Retrying matchmaking (%d/%d)…" % [attempt, MAX_JOIN_RETRIES])
+		if current_lobby != null:
+			await leave_room()
+			operation_active = true
+			if op_id != _join_operation_id:
+				return
+
 	status_changed.emit("Finding room %s…" % clean_code)
 	var matches = []
-	for attempt in range(1, 9):
+	for search_attempt in range(1, 6):
+		if op_id != _join_operation_id or not operation_active:
+			return
 		matches = await HLobbies.search_by_attribute_async({"key": ROOM_CODE_ATTRIBUTE, "value": clean_code})
 		if matches != null and not matches.is_empty():
 			break
-		if attempt < 8:
-			status_changed.emit("Room is still publishing… retrying automatically (%d/8)…" % (attempt + 1))
-			await get_tree().create_timer(0.9).timeout
+		if search_attempt % 2 == 0:
+			var bucket_lobbies = await HLobbies.search_by_bucket_id_async(BUCKET_ID)
+			if bucket_lobbies != null:
+				for candidate in bucket_lobbies:
+					var code_attr = candidate.get_attribute(ROOM_CODE_ATTRIBUTE)
+					var candidate_code := str(code_attr.get("value", "")).to_upper()
+					if candidate_code == clean_code:
+						matches = [candidate]
+						break
+			if not matches.is_empty():
+				break
+		if search_attempt < 5:
+			await get_tree().create_timer(0.4).timeout
+
+	if op_id != _join_operation_id or not operation_active:
+		return
+
 	if matches == null or matches.is_empty():
-		_failed("Room not found. Check the code or ask the host to create a new room.")
-		return
-	current_lobby = await HLobbies.join_async(matches[0])
-	if current_lobby == null:
-		_failed("Could not join that room. It may be full or closed.")
-		return
+		if attempt < MAX_JOIN_RETRIES:
+			status_changed.emit("Room not found yet. Retrying matchmaking (%d/%d)…" % [attempt + 1, MAX_JOIN_RETRIES])
+			await get_tree().create_timer(0.8).timeout
+			_execute_join_with_retry(op_id, clean_code, display_name, color_index, attempt + 1)
+			return
+		else:
+			_failed("Room not found. Check the code or ask the host to create a new room.")
+			return
+
+	var joined_lobby: HLobby = null
+	for candidate in matches:
+		if op_id != _join_operation_id or not operation_active:
+			return
+		joined_lobby = await HLobbies.join_async(candidate)
+		if joined_lobby != null and joined_lobby.is_valid():
+			break
+		joined_lobby = null
+
+	if joined_lobby == null:
+		if attempt < MAX_JOIN_RETRIES:
+			status_changed.emit("Room slot busy or full. Retrying matchmaking (%d/%d)…" % [attempt + 1, MAX_JOIN_RETRIES])
+			await get_tree().create_timer(0.8).timeout
+			_execute_join_with_retry(op_id, clean_code, display_name, color_index, attempt + 1)
+			return
+		else:
+			_failed("Could not join that room. It may be full or closed.")
+			return
+
+	current_lobby = joined_lobby
 	current_lobby.add_current_member_attribute("name", display_name)
 	current_lobby.add_current_member_attribute("color", clampi(color_index, 0, 5))
 	if not await current_lobby.update_async():
-		_failed("Joined the room but could not update the player profile.")
+		if attempt < MAX_JOIN_RETRIES:
+			_execute_join_with_retry(op_id, clean_code, display_name, color_index, attempt + 1)
+			return
+		else:
+			_failed("Joined the room but could not update the player profile.")
+			return
+
+	if op_id != _join_operation_id or not operation_active:
 		return
+
 	_watch_lobby()
-	# The host validates a P2P player against its live EOS lobby member list.
-	# Give EOS a brief moment to deliver this membership update before opening
-	# the gameplay socket. This matters when several players join at once.
 	status_changed.emit("Joining room %s… syncing player list…" % clean_code)
-	await get_tree().create_timer(0.75).timeout
-	if current_lobby == null or not current_lobby.is_valid():
-		_failed("The room closed before the connection could be opened.")
+	await get_tree().create_timer(0.15).timeout
+
+	if op_id != _join_operation_id or not operation_active:
 		return
+
+	if current_lobby == null or not current_lobby.is_valid():
+		if attempt < MAX_JOIN_RETRIES:
+			_execute_join_with_retry(op_id, clean_code, display_name, color_index, attempt + 1)
+			return
+		else:
+			_failed("The room closed before the connection could be opened.")
+			return
+
 	var host_id := current_lobby.owner_product_user_id
 	if host_id.is_empty():
 		_failed("Room has no active host.")
 		return
+
+	_start_p2p_handshake_guard(op_id, clean_code, display_name, color_index, attempt)
+
 	var connection_error: int = session.connect_to_eos_host(host_id, HAuth.product_user_id, display_name, color_index)
 	if connection_error != OK:
-		_failed("Could not connect to the P2P host: " + error_string(connection_error))
-		return
+		if attempt < MAX_JOIN_RETRIES:
+			status_changed.emit("P2P connection error. Retrying matchmaking (%d/%d)…" % [attempt + 1, MAX_JOIN_RETRIES])
+			_execute_join_with_retry(op_id, clean_code, display_name, color_index, attempt + 1)
+			return
+		else:
+			_failed("Could not connect to the P2P host: " + error_string(connection_error))
+			return
+
 	status_changed.emit("Connecting to room %s…" % clean_code)
 
 
+func _start_fail_safe_timeout(op_id: int, timeout_seconds: float) -> void:
+	var tree := get_tree()
+	if tree == null:
+		return
+	tree.create_timer(timeout_seconds).timeout.connect(func():
+		if op_id == _join_operation_id and operation_active:
+			status_changed.emit("Matchmaking timed out (%ds limit). Cleaning up..." % int(timeout_seconds))
+			_failed("Matchmaking timed out. Please check your network connection and try again.")
+	, CONNECT_ONE_SHOT)
+
+
+func _start_p2p_handshake_guard(op_id: int, clean_code: String, display_name: String, color_index: int, attempt: int) -> void:
+	var tree := get_tree()
+	if tree == null:
+		return
+	tree.create_timer(P2P_HANDSHAKE_GUARD_SECONDS).timeout.connect(func():
+		if op_id == _join_operation_id and operation_active:
+			status_changed.emit("Connection to host timed out. Retrying matchmaking…")
+			if attempt < MAX_JOIN_RETRIES:
+				_execute_join_with_retry(op_id, clean_code, display_name, color_index, attempt + 1)
+			else:
+				_failed("Connection to host timed out. Check firewalls or host availability.")
+	, CONNECT_ONE_SHOT)
+
+
 func leave_room() -> void:
-	if current_lobby != null and current_lobby.is_valid():
-		await current_lobby.leave_async()
+	_join_operation_id += 1
+	operation_active = false
+	if leaving_lobby:
+		return
+	var lobby_to_leave := current_lobby
 	current_lobby = null
+	if lobby_to_leave == null or not lobby_to_leave.is_valid():
+		return
+	leaving_lobby = true
+	if lobby_to_leave.is_owner():
+		await lobby_to_leave.destroy_async()
+	else:
+		await lobby_to_leave.leave_async()
+	leaving_lobby = false
+
+
+func _attach_session(network_session: Node) -> void:
+	if is_instance_valid(session) and session != network_session:
+		if session.join_succeeded.is_connected(_on_session_join_succeeded):
+			session.join_succeeded.disconnect(_on_session_join_succeeded)
+		if session.join_failed.is_connected(_on_session_join_failed):
+			session.join_failed.disconnect(_on_session_join_failed)
+	session = network_session
+	if not session.join_succeeded.is_connected(_on_session_join_succeeded):
+		session.join_succeeded.connect(_on_session_join_succeeded)
+	if not session.join_failed.is_connected(_on_session_join_failed):
+		session.join_failed.connect(_on_session_join_failed)
+
+
+func _on_session_join_succeeded(_state: Dictionary) -> void:
+	_join_operation_id += 1
+	operation_active = false
+
+
+func _on_session_join_failed(_message: String) -> void:
+	if not operation_active:
+		return
+	_join_operation_id += 1
+	operation_active = false
+	leave_room()
 
 
 func _ensure_signed_in(display_name: String) -> bool:
@@ -130,23 +313,33 @@ func _ensure_signed_in(display_name: String) -> bool:
 			_failed("Could not initialize Epic Online Services. Check the configured IDs.")
 			return false
 		eos_ready = true
+		HP2P.set_relay_control(EOS.P2P.RelayControl.AllowRelays)
 	if HAuth.product_user_id.is_empty():
 		var signed_in := false
 		for attempt in range(1, 4):
-			# Most failures here are short EOS/network races. Retry silently, then
-			# repair a stale Device ID on the final attempt so the player never has
-			# to clear app data or edit a cache folder manually.
-			var repair_device_id := attempt == 3
+			# Most failures here are short EOS/network races. Attempt 2+ repairs stale
+			# Device IDs immediately so the player never has to clear app data manually.
+			var repair_device_id := attempt >= 2
 			if await HAuth.login_anonymous_async(display_name, repair_device_id):
 				signed_in = true
 				break
 			if attempt < 3:
-				status_changed.emit("Multiplayer sign-in is taking longer than expectedâ€¦ retrying automatically (%d/3)â€¦" % (attempt + 1))
-				await get_tree().create_timer(0.75 * attempt).timeout
+				status_changed.emit("Multiplayer sign-in is taking longer than expected… retrying automatically (%d/3)…" % (attempt + 1))
+				await get_tree().create_timer(0.4 * attempt).timeout
 		if not signed_in:
+			clear_eos_cache()
 			_failed("Could not sign in to multiplayer after automatic recovery. Check the internet connection and try again.")
 			return false
 	return true
+
+
+static func clear_eos_cache() -> void:
+	var profiles_root := ProjectSettings.globalize_path("user://eos-instance-profiles")
+	if DirAccess.dir_exists_absolute(profiles_root):
+		DirAccess.remove_absolute(profiles_root)
+	var eosg_cache := ProjectSettings.globalize_path("user://eosg-cache")
+	if DirAccess.dir_exists_absolute(eosg_cache):
+		DirAccess.remove_absolute(eosg_cache)
 
 
 func _credential(key: String) -> String:
@@ -163,6 +356,8 @@ func _watch_lobby() -> void:
 		return
 	if not current_lobby.lobby_updated.is_connected(_sync_members):
 		current_lobby.lobby_updated.connect(_sync_members)
+	if not current_lobby.kicked_from_lobby.is_connected(_on_lobby_closed):
+		current_lobby.kicked_from_lobby.connect(_on_lobby_closed)
 	if not current_lobby.lobby_owner_changed.is_connected(_on_lobby_owner_changed):
 		current_lobby.lobby_owner_changed.connect(_on_lobby_owner_changed)
 	if is_instance_valid(session) and session.has_signal("eos_membership_refresh_requested") and not session.eos_membership_refresh_requested.is_connected(_refresh_membership_burst):
@@ -210,6 +405,17 @@ func _on_lobby_owner_changed() -> void:
 		status_changed.emit("Lobby host changed. Recreate the room before starting a new match.")
 
 
+func _on_lobby_closed() -> void:
+	if leaving_lobby:
+		return
+	current_lobby = null
+	_join_operation_id += 1
+	operation_active = false
+	if is_instance_valid(session):
+		session.disconnect_session()
+	_failed("The host closed the room. Ask them for a new code.")
+
+
 func _new_room_code() -> String:
 	var code := ""
 	for _index in 6:
@@ -218,5 +424,9 @@ func _new_room_code() -> String:
 
 
 func _failed(message: String) -> void:
+	_join_operation_id += 1
+	operation_active = false
+	if current_lobby != null:
+		leave_room()
 	failed.emit(message)
 	status_changed.emit(message)
