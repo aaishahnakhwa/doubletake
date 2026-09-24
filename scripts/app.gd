@@ -176,8 +176,10 @@ func _join_room(code: String, display_name: String, color_index: int) -> void:
 
 func _join_lan_test(address: String, display_name: String, color_index: int) -> void:
 	var host := address.strip_edges().trim_prefix("http://").trim_prefix("https://").trim_suffix("/")
+	if host.contains(":"):
+		host = host.split(":")[0]
 	if host.is_empty() or host.length() > 64:
-		_on_eos_lobby_failed("Enter the PC's Wi-Fi IPv4 address, for example 192.168.1.25.")
+		_on_eos_lobby_failed("Enter the host's Wi-Fi IPv4 address, for example 192.168.1.25.")
 		return
 	pending_name = _clean_name(display_name)
 	pending_color = color_index

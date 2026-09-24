@@ -105,7 +105,16 @@ func _process(delta: float) -> void:
 		if player_id == session.local_player_id or not target_positions.has(player_id):
 			continue
 		var actor: CharacterBody2D = actor_by_id[player_id]
-		actor.global_position = actor.global_position.lerp(target_positions[player_id], minf(1.0, delta * 12.0))
+		var target: Vector2 = target_positions[player_id]
+		var dist := actor.global_position.distance_to(target)
+		if dist > 3.0:
+			actor.remote_direction = actor.global_position.direction_to(target)
+			var move_speed := dist / maxf(delta, 0.001)
+			actor.remote_running = move_speed > 200.0
+		else:
+			actor.remote_direction = Vector2.ZERO
+			actor.remote_running = false
+		actor.global_position = actor.global_position.lerp(target, minf(1.0, delta * 14.0))
 
 
 func _physics_process(delta: float) -> void:

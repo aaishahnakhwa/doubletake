@@ -70,10 +70,7 @@ func _ready() -> void:
 	layer = 90
 	killer_color = clampi(int(body_state.get("killer_color", 0)), 0, 5)
 	victim_color = clampi(int(body_state.get("color", 0)), 0, 5)
-	var context: Dictionary = body_state.get("context", {})
-	context_id = str(context.get("id", "normal"))
-	if context_id == "dock":
-		context_id = "lake"
+	context_id = "normal"
 
 	root = Control.new()
 	root.mouse_filter = Control.MOUSE_FILTER_STOP

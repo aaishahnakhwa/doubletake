@@ -521,18 +521,8 @@ func get_nearest_station(at: Vector2, radius: float = 95.0) -> Dictionary:
 	return nearest
 
 
-func get_contextual_elimination(killer_at: Vector2, victim_at: Vector2, radius: float = 145.0) -> Dictionary:
-	var nearest: Dictionary = {"id": "normal", "name": "Close-range"}
-	var best_score := 1.0
-	for source: Dictionary in ELIMINATION_CONTEXTS:
-		var at: Vector2 = source["at"] * ART_SCALE
-		var combined_distance := maxf(killer_at.distance_to(at), victim_at.distance_to(at))
-		var context_radius := float(source.get("radius", radius))
-		var score := combined_distance / context_radius
-		if score <= best_score:
-			best_score = score
-			nearest = {"id": source["id"], "name": source["name"]}
-	return nearest
+func get_contextual_elimination(_killer_at: Vector2, _victim_at: Vector2, _radius: float = 145.0) -> Dictionary:
+	return {"id": "normal", "name": "Close-range"}
 
 
 func get_spawn_point() -> Vector2:

@@ -46,6 +46,8 @@ var active_frame := -1
 var input_locked := false
 var is_ghost := false
 var is_performing_action := false
+var remote_direction := Vector2.ZERO
+var remote_running := false
 
 
 func _ready() -> void:
@@ -144,25 +146,34 @@ func _update_customization_textures() -> void:
 
 func _physics_process(delta: float) -> void:
 	var direction := Vector2.ZERO
+	var running := false
 	if is_local:
 		if not input_locked:
 			direction = Input.get_vector("move_left", "move_right", "move_up", "move_down")
 			if touch_direction.length_squared() > 0.01:
 				direction = touch_direction
+		running = not input_locked and (Input.is_action_pressed("sprint") or touch_direction.length() > 0.72)
+		velocity = direction * speed * (1.38 if running else 1.0)
+		move_and_slide()
 	else:
-		if route_path.is_empty() or route_index >= route_path.size():
-			route_point_reached.emit(self)
-		else:
-			if global_position.distance_to(route_path[route_index]) < 19.0:
-				route_index += 1
+		if not route_path.is_empty():
 			if route_index >= route_path.size():
+				route_point_reached.emit(self)
+			else:
+				if global_position.distance_to(route_path[route_index]) < 19.0:
+					route_index += 1
+				if route_index >= route_path.size():
 					route_point_reached.emit(self)
-			if route_index < route_path.size():
-				direction = global_position.direction_to(route_path[route_index])
-	var running := is_local and not input_locked and (Input.is_action_pressed("sprint") or touch_direction.length() > 0.72)
-	velocity = direction * speed * (1.38 if running else 1.0)
-	move_and_slide()
-	if not is_local and direction.length_squared() > 0.1:
+				if route_index < route_path.size():
+					direction = global_position.direction_to(route_path[route_index])
+			velocity = direction * speed
+			move_and_slide()
+		else:
+			# Remote player in multiplayer: direction and running state are driven by target position interpolation
+			direction = remote_direction
+			running = remote_running
+
+	if not is_local and not route_path.is_empty() and direction.length_squared() > 0.1:
 		if global_position.distance_to(last_position) < 0.8:
 			stuck_time += delta
 			if stuck_time > 0.8:

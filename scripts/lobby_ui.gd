@@ -95,7 +95,7 @@ var selected_color_idx := 0
 var current_wardrobe_tab := "looks"
 var color_hint: Label
 var allow_test_bots := OS.is_debug_build()
-var allow_lan_test := OS.is_debug_build()
+var allow_lan_test := true
 var allow_role_picker := OS.is_debug_build()
 var test_bots_enabled := false
 var requested_color := -1

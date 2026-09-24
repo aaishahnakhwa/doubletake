@@ -243,34 +243,34 @@ func _open_eos_client_connection() -> int:
 	multiplayer.multiplayer_peer = peer
 	eos_connect_attempts += 1
 	eos_connect_started_at = Time.get_unix_time_from_system()
-	call_deferred("_arm_transport_events")
+	_arm_transport_events()
 	status_changed.emit("Connecting through internet P2P…")
 	return int(OK)
 
 
 func set_eos_allowed_player_ids(player_ids: Array[String]) -> void:
-	eos_allowed_player_ids.clear()
 	for player_id in player_ids:
 		if not player_id.is_empty():
 			eos_allowed_player_ids[player_id] = true
 	if is_server and is_eos_p2p:
+		var now := Time.get_unix_time_from_system()
 		var to_purge: Array[String] = []
 		for p_id: String in players:
 			if p_id == local_player_id or bool(players[p_id].get("bot", false)):
 				continue
-			if not eos_allowed_player_ids.has(p_id):
-				to_purge.append(p_id)
-		for p_id in to_purge:
 			var record: Dictionary = players[p_id]
-			var peer_id := int(record.get("peer_id", 0))
-			if peer_id > 0 and multiplayer.multiplayer_peer != null and peer_id in multiplayer.get_peers():
-				multiplayer.multiplayer_peer.disconnect_peer(peer_id)
+			# Only purge players who are marked disconnected AND past their reconnect deadline
+			if not bool(record.get("connected", false)) and not match_running:
+				var deadline := float(record.get("reconnect_deadline", 0.0))
+				if deadline > 0.0 and now >= deadline and not eos_allowed_player_ids.has(p_id):
+					to_purge.append(p_id)
+		for p_id in to_purge:
 			_remove_player(p_id)
 		if not to_purge.is_empty() and not match_running:
 			_assign_host_if_needed()
 			_broadcast_lobby_state()
 		if not pending_eos_joins.is_empty():
-			_process_pending_eos_joins(Time.get_unix_time_from_system())
+			_process_pending_eos_joins(now)
 
 
 func connect_to_server(address: String, port: int, token: String, display_name: String, color_index: int) -> Error:
@@ -289,7 +289,7 @@ func connect_to_server(address: String, port: int, token: String, display_name: 
 		join_failed.emit("Could not connect: " + error_string(error))
 		return error
 	multiplayer.multiplayer_peer = peer
-	call_deferred("_arm_transport_events")
+	_arm_transport_events()
 	status_changed.emit("Connecting to %s:%d…" % [address, port])
 	return OK
 
@@ -351,133 +351,133 @@ func _arm_transport_events() -> void:
 func set_ready(ready: bool) -> void:
 	if is_server and not local_player_id.is_empty():
 		_set_ready_for_player(local_player_id, ready)
-	elif multiplayer.multiplayer_peer != null:
+	elif _is_client_connected():
 		rpc_set_ready.rpc_id(1, ready)
 
 
 func request_color(color_index: int) -> void:
 	if is_server and not local_player_id.is_empty():
 		_set_color_for_player(local_player_id, color_index)
-	elif multiplayer.multiplayer_peer != null:
+	elif _is_client_connected():
 		request_color_change.rpc_id(1, color_index)
 
 
 func update_settings(settings: Dictionary) -> void:
 	if is_server and not local_player_id.is_empty():
 		_update_settings_for_player(local_player_id, settings)
-	elif multiplayer.multiplayer_peer != null:
+	elif _is_client_connected():
 		request_settings.rpc_id(1, settings)
 
 
 func request_match_start() -> void:
 	if is_server and not local_player_id.is_empty():
 		_request_start_for_player(local_player_id)
-	elif multiplayer.multiplayer_peer != null:
+	elif _is_client_connected():
 		request_start_match.rpc_id(1)
 
 
 func request_rematch() -> void:
 	if is_server and not local_player_id.is_empty():
 		_rematch_for_player(local_player_id)
-	elif multiplayer.multiplayer_peer != null:
+	elif _is_client_connected():
 		rpc_request_rematch.rpc_id(1)
 
 
 func request_return_to_lobby() -> void:
 	if is_server and not local_player_id.is_empty():
 		_return_to_lobby_for_player(local_player_id)
-	elif multiplayer.multiplayer_peer != null:
+	elif _is_client_connected():
 		rpc_request_return_to_lobby.rpc_id(1)
 
 
 func set_rematch_ready(ready: bool) -> void:
 	if is_server:
 		player_rematch_ready.emit(local_player_id, ready)
-	elif multiplayer.multiplayer_peer != null:
+	elif _is_client_connected():
 		rpc_set_rematch_ready.rpc_id(1, ready)
 
 
 func set_test_bots(enabled: bool) -> void:
 	if is_server and not local_player_id.is_empty():
 		_set_test_bots_for_player(local_player_id, enabled)
-	elif multiplayer.multiplayer_peer != null:
+	elif _is_client_connected():
 		request_test_bots.rpc_id(1, enabled)
 
 
 func send_movement(direction: Vector2, sprinting: bool) -> void:
 	if is_server and not local_player_id.is_empty():
 		_apply_input(local_player_id, direction, sprinting)
-	elif multiplayer.multiplayer_peer != null and multiplayer.multiplayer_peer.get_connection_status() == MultiplayerPeer.CONNECTION_CONNECTED:
+	elif _is_client_connected():
 		submit_input.rpc_id(1, direction.limit_length(1.0), sprinting)
 
 
 func begin_task(task_id: String) -> void:
 	if is_server and not local_player_id.is_empty():
 		_begin_task_for_player(local_player_id, task_id)
-	elif multiplayer.multiplayer_peer != null:
+	elif _is_client_connected():
 		request_begin_task.rpc_id(1, task_id)
 
 
 func complete_task(task_id: String) -> void:
 	if is_server and not local_player_id.is_empty():
 		_complete_task_for_player(local_player_id, task_id)
-	elif multiplayer.multiplayer_peer != null:
+	elif _is_client_connected():
 		request_complete_task.rpc_id(1, task_id)
 
 
 func request_kill() -> void:
 	if is_server and not local_player_id.is_empty():
 		_kill_nearest_for_player(local_player_id)
-	elif multiplayer.multiplayer_peer != null:
+	elif _is_client_connected():
 		request_kill_nearby.rpc_id(1)
 
 
 func request_sabotage(sabotage_id: String) -> void:
 	if is_server and not local_player_id.is_empty():
 		_start_sabotage_for_player(local_player_id, sabotage_id)
-	elif multiplayer.multiplayer_peer != null:
+	elif _is_client_connected():
 		request_start_sabotage.rpc_id(1, sabotage_id)
 
 
 func request_repair(sabotage_id: String) -> void:
 	if is_server and not local_player_id.is_empty():
 		_repair_sabotage_for_player(local_player_id, sabotage_id)
-	elif multiplayer.multiplayer_peer != null:
+	elif _is_client_connected():
 		request_repair_sabotage.rpc_id(1, sabotage_id)
 
 
 func report_nearby_body() -> void:
 	if is_server and not local_player_id.is_empty():
 		_report_nearby_body_for_player(local_player_id)
-	elif multiplayer.multiplayer_peer != null:
+	elif _is_client_connected():
 		request_report_nearby_body.rpc_id(1)
 
 
 func request_emergency_meeting() -> void:
 	if is_server and not local_player_id.is_empty():
 		_start_emergency_meeting_for_player(local_player_id)
-	elif multiplayer.multiplayer_peer != null:
+	elif _is_client_connected():
 		rpc_request_emergency_meeting.rpc_id(1)
 
 
 func request_end_meeting() -> void:
 	if is_server:
 		_end_meeting()
-	elif multiplayer.multiplayer_peer != null:
+	elif _is_client_connected():
 		rpc_request_end_meeting.rpc_id(1)
 
 
 func cast_vote(target_id: String) -> void:
 	if is_server:
 		_record_vote(local_player_id, target_id)
-	elif multiplayer.multiplayer_peer != null:
+	elif _is_client_connected():
 		rpc_cast_vote.rpc_id(1, target_id)
 
 
 func send_chat(text: String) -> void:
 	if is_server:
 		_process_chat_message(local_player_id, text)
-	elif multiplayer.multiplayer_peer != null:
+	elif _is_client_connected():
 		rpc_send_chat.rpc_id(1, text)
 
 
@@ -533,7 +533,20 @@ func _physics_process(delta: float) -> void:
 			receive_snapshot.rpc_id(peer_id, snapshot)
 
 
+static func log_network_event(event_text: String) -> void:
+	var msg := "[NET_DEBUG %s] %s" % [Time.get_datetime_string_from_system(), event_text]
+	print(msg)
+	var file := FileAccess.open("user://network_debug.log", FileAccess.READ_WRITE)
+	if file == null:
+		file = FileAccess.open("user://network_debug.log", FileAccess.WRITE)
+	if file != null:
+		file.seek_end()
+		file.store_line(msg)
+		file.close()
+
+
 func _on_connected_to_server() -> void:
+	log_network_event("CONNECTED_TO_SERVER player=" + local_player_id)
 	if is_server or manual_disconnect or not transport_events_armed:
 		return
 	reconnecting = false
@@ -559,6 +572,7 @@ func _send_eos_join_request() -> void:
 
 
 func _on_connection_failed() -> void:
+	log_network_event("CONNECTION_FAILED")
 	if is_server or manual_disconnect or not transport_events_armed:
 		return
 	transport_events_armed = false
@@ -574,6 +588,7 @@ func _on_connection_failed() -> void:
 
 
 func _on_server_disconnected() -> void:
+	log_network_event("SERVER_DISCONNECTED player=" + local_player_id)
 	if is_server or manual_disconnect or not transport_events_armed:
 		return
 	transport_events_armed = false
@@ -582,9 +597,6 @@ func _on_server_disconnected() -> void:
 	if local_token.is_empty():
 		_fail_connection("Disconnected from the room server.")
 		return
-	# Until receive_join_success arrives this is still a first-time join, not a
-	# reconnect. Keeping those states separate prevents a failed attempt from
-	# presenting a false reconnect flow or racing lobby cleanup.
 	if not has_joined_session:
 		if is_eos_p2p and eos_connect_attempts < EOS_CONNECT_MAX_ATTEMPTS:
 			_schedule_eos_connect_retry()
@@ -597,12 +609,14 @@ func _on_server_disconnected() -> void:
 	status_changed.emit("Connection lost. Reconnecting for up to 60 seconds…")
 
 
-func _on_peer_connected(_peer_id: int) -> void:
+func _on_peer_connected(peer_id: int) -> void:
+	log_network_event("PEER_CONNECTED peer=" + str(peer_id))
 	if is_server and is_eos_p2p:
 		eos_membership_refresh_requested.emit()
 
 
 func _on_peer_disconnected(peer_id: int) -> void:
+	log_network_event("PEER_DISCONNECTED peer=" + str(peer_id))
 	pending_eos_joins.erase(peer_id)
 	if not is_server or not peer_to_player.has(peer_id):
 		return
@@ -658,15 +672,14 @@ func _accept_join_request(peer_id: int, claims: Dictionary, display_name: String
 		return
 	if players.has(player_id):
 		var existing: Dictionary = players[player_id]
-		if existing["connected"]:
-			# The client may retry if the first EOS success response was lost.
-			# Re-send the current authoritative state to that same peer.
-			if int(existing.get("peer_id", 0)) == peer_id:
-				var retry_packet := _encode_state_packet(_make_lobby_state())
-				receive_join_success.rpc_id(peer_id, player_id, int(retry_packet[0]), retry_packet[1])
-				return
+		var active_peers: Array = multiplayer.get_peers() if multiplayer.multiplayer_peer != null else []
+		var old_peer_id := int(existing.get("peer_id", 0))
+		var old_peer_active: bool = old_peer_id in active_peers
+		if existing["connected"] and old_peer_active and old_peer_id != peer_id:
 			_reject_join(peer_id, "This player is already connected.")
 			return
+		if old_peer_active and old_peer_id != peer_id and multiplayer.multiplayer_peer != null:
+			multiplayer.multiplayer_peer.disconnect_peer(old_peer_id)
 		existing["peer_id"] = peer_id
 		existing["connected"] = true
 		existing["reconnect_deadline"] = 0.0
@@ -798,7 +811,7 @@ func request_customization(color_index: int, hat: String, outfit: String) -> voi
 func set_customization(color_index: int, hat: String, outfit: String) -> void:
 	if is_server:
 		_set_customization_for_player(local_player_id, color_index, hat, outfit)
-	else:
+	elif _is_client_connected():
 		request_customization.rpc_id(1, color_index, hat, outfit)
 
 
@@ -883,7 +896,7 @@ func _send_color_change_failure(player_id: String, message: String) -> void:
 		return
 	var record: Dictionary = players.get(player_id, {})
 	var peer_id := int(record.get("peer_id", 0))
-	if peer_id > 0:
+	if _is_peer_connected(peer_id):
 		receive_color_change_failure.rpc_id(peer_id, message)
 
 
@@ -1309,7 +1322,7 @@ func _start_match() -> void:
 		var match_packet := _encode_state_packet(state)
 		if _is_local_server_player(player_id):
 			receive_match_started(str(player["role"]), int(match_packet[0]), match_packet[1])
-		else:
+		elif _is_peer_connected(peer_id):
 			receive_match_started.rpc_id(peer_id, str(player["role"]), int(match_packet[0]), match_packet[1])
 	_broadcast_phase4_state()
 
@@ -1416,7 +1429,7 @@ func _broadcast_phase4_state() -> void:
 		var state := _phase4_state_for(player_id)
 		if _is_local_server_player(player_id):
 			phase4_state_received.emit(state)
-		elif peer_id > 0:
+		elif _is_peer_connected(peer_id):
 			var phase4_packet := _encode_state_packet(state)
 			receive_phase4_state.rpc_id(peer_id, int(phase4_packet[0]), phase4_packet[1])
 
@@ -1647,7 +1660,7 @@ func _broadcast_meeting_start(meeting: Dictionary) -> void:
 		var peer_id := int(record["peer_id"])
 		if _is_local_server_player(pid):
 			meeting_started.emit(meeting)
-		elif peer_id > 0:
+		elif _is_peer_connected(peer_id):
 			receive_meeting_started.rpc_id(peer_id, int(packet[0]), packet[1])
 	var total_time := float(meeting.get("discussion_time", 15.0)) + float(meeting.get("voting_time", 45.0))
 	get_tree().create_timer(total_time + 1.2).timeout.connect(func() -> void:
@@ -1678,7 +1691,7 @@ func _record_vote(voter_id: String, target_id: String) -> void:
 		var peer_id := int(record["peer_id"])
 		if _is_local_server_player(pid):
 			player_voted.emit(voter_id)
-		elif peer_id > 0:
+		elif _is_peer_connected(peer_id):
 			receive_player_voted.rpc_id(peer_id, voter_id)
 	
 	var living_count := 0
@@ -1748,7 +1761,7 @@ func _tally_votes_and_conclude() -> void:
 		var peer_id := int(record["peer_id"])
 		if _is_local_server_player(pid):
 			voting_results_received.emit(results)
-		elif peer_id > 0:
+		elif _is_peer_connected(peer_id):
 			receive_voting_results.rpc_id(peer_id, int(packet[0]), packet[1])
 
 
@@ -1766,7 +1779,7 @@ func _end_meeting() -> void:
 		var peer_id := int(record["peer_id"])
 		if _is_local_server_player(pid):
 			meeting_ended.emit()
-		elif peer_id > 0:
+		elif _is_peer_connected(peer_id):
 			receive_meeting_ended.rpc_id(peer_id)
 	_check_victory_conditions()
 
@@ -1820,7 +1833,7 @@ func _broadcast_chat_message(msg: Dictionary, is_ghost_sender: bool) -> void:
 
 		if _is_local_server_player(pid):
 			chat_message_received.emit(msg)
-		elif peer_id > 0:
+		elif _is_peer_connected(peer_id):
 			receive_chat_message.rpc_id(peer_id, int(packet[0]), packet[1])
 
 
@@ -1829,7 +1842,7 @@ func _send_chat_failure(player_id: String, message: String) -> void:
 	var peer_id := int(record.get("peer_id", 0))
 	if _is_local_server_player(player_id):
 		chat_action_failed.emit(message)
-	elif peer_id > 0:
+	elif _is_peer_connected(peer_id):
 		receive_chat_action_failed.rpc_id(peer_id, message)
 
 
@@ -1841,7 +1854,7 @@ func _emit_body_report(player_id: String, body: Dictionary) -> void:
 		var peer_id := int(record.get("peer_id", 0))
 		if _is_local_server_player(pid):
 			body_reported.emit(body)
-		elif peer_id > 0:
+		elif _is_peer_connected(peer_id):
 			receive_body_reported.rpc_id(peer_id, body)
 
 
@@ -1850,7 +1863,7 @@ func _send_phase4_failure(player_id: String, message: String) -> void:
 	var peer_id := int(record.get("peer_id", 0))
 	if _is_local_server_player(player_id):
 		phase4_action_failed.emit(message)
-	elif peer_id > 0:
+	elif _is_peer_connected(peer_id):
 		receive_phase4_action_failed.rpc_id(peer_id, message)
 
 
@@ -1862,7 +1875,7 @@ func _begin_task_for_player(player_id: String, task_id: String) -> void:
 	var peer_id := int(players[player_id].get("peer_id", 0))
 	if _is_local_server_player(player_id):
 		task_begin_approved.emit(task_id)
-	elif peer_id > 0:
+	elif _is_peer_connected(peer_id):
 		receive_task_begin_approved.rpc_id(peer_id, task_id)
 
 
@@ -1910,7 +1923,7 @@ func _broadcast_task_state() -> void:
 		var state := _task_state_for(player_id)
 		if _is_local_server_player(player_id):
 			task_state_received.emit(state)
-		else:
+		elif _is_peer_connected(peer_id):
 			var task_packet := _encode_state_packet(state)
 			receive_task_state.rpc_id(peer_id, int(task_packet[0]), task_packet[1])
 
@@ -1920,7 +1933,7 @@ func _send_task_failure(player_id: String, message: String) -> void:
 	var peer_id := int(record.get("peer_id", 0))
 	if _is_local_server_player(player_id):
 		task_action_failed.emit(message)
-	elif peer_id > 0:
+	elif _is_peer_connected(peer_id):
 		receive_task_action_failed.rpc_id(peer_id, message)
 
 
@@ -2019,7 +2032,7 @@ func _finish_match(winner: String, reason: String) -> void:
 		var pid := str(record.get("player_id", ""))
 		if _is_local_server_player(pid):
 			match_ended.emit(winner, reason, outcome)
-		elif peer_id > 1 and multiplayer.multiplayer_peer != null:
+		elif _is_peer_connected(peer_id):
 			receive_match_ended.rpc_id(peer_id, winner, reason, int(packet[0]), packet[1])
 
 
@@ -2075,7 +2088,7 @@ func _return_to_lobby() -> void:
 		var pid := str(record.get("player_id", ""))
 		if _is_local_server_player(pid):
 			match_returned_to_lobby.emit()
-		elif peer_id > 1 and multiplayer.multiplayer_peer != null:
+		elif _is_peer_connected(peer_id):
 			receive_return_to_lobby.rpc_id(peer_id)
 
 
@@ -2100,6 +2113,15 @@ func _is_local_server_player(player_id: String) -> bool:
 	return peer_id == 1 and (local_player_id.is_empty() or player_id == local_player_id)
 
 
+func _is_peer_connected(peer_id: int) -> bool:
+	return peer_id > 1 and multiplayer.multiplayer_peer != null and multiplayer.multiplayer_peer.get_connection_status() == MultiplayerPeer.CONNECTION_CONNECTED and peer_id in multiplayer.get_peers()
+
+
+func _is_client_connected() -> bool:
+	return multiplayer.multiplayer_peer != null and multiplayer.multiplayer_peer.get_connection_status() == MultiplayerPeer.CONNECTION_CONNECTED
+
+
+
 func _create_server_world() -> void:
 	server_world = WorldScript.new()
 	server_world.name = "AuthoritativeCamp"
@@ -2117,7 +2139,7 @@ func _broadcast_lobby_state() -> void:
 		var peer_id := int(record["peer_id"])
 		if _is_local_server_player(str(record.get("player_id", ""))):
 			lobby_state_changed.emit(state)
-		elif peer_id > 1 and multiplayer.multiplayer_peer != null:
+		elif _is_peer_connected(peer_id):
 			receive_lobby_state.rpc_id(peer_id, int(lobby_packet[0]), lobby_packet[1])
 
 
@@ -2126,8 +2148,9 @@ func _emit_start_failure(player_id: String, message: String) -> void:
 		join_failed.emit(message)
 		return
 	var record: Dictionary = players.get(player_id, {})
-	if not record.is_empty():
-		receive_join_failure.rpc_id(int(record.get("peer_id", 0)), message)
+	var peer_id := int(record.get("peer_id", 0))
+	if _is_peer_connected(peer_id):
+		receive_join_failure.rpc_id(peer_id, message)
 
 
 func _encode_state_packet(state: Dictionary) -> Array:
@@ -2275,7 +2298,7 @@ func _process_reconnect() -> void:
 		error = peer.create_client(server_address, server_port)
 	if error == OK:
 		multiplayer.multiplayer_peer = peer
-		call_deferred("_arm_transport_events")
+		_arm_transport_events()
 		status_changed.emit("Reconnecting…")
 
 
