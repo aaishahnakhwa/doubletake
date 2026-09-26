@@ -496,6 +496,7 @@ func _process(_delta: float) -> void:
 	var now := Time.get_unix_time_from_system()
 	_process_sabotage_expiry(now)
 	_process_pending_eos_joins(now)
+	_reap_stale_peers()
 	var expired: Array[String] = []
 	for player_id: String in players:
 		var record: Dictionary = players[player_id]
@@ -621,26 +622,9 @@ func _on_peer_disconnected(peer_id: int) -> void:
 	if not is_server or not peer_to_player.has(peer_id):
 		return
 	var player_id: String = peer_to_player[peer_id]
-	peer_to_player.erase(peer_id)
 	if not players.has(player_id):
 		return
-	var record: Dictionary = players[player_id]
-	record["connected"] = false
-	record["peer_id"] = 0
-	record["ready"] = false
-	if is_eos_p2p and not match_running:
-		record["reconnect_deadline"] = Time.get_unix_time_from_system() + EOS_MEMBERSHIP_GRACE_SECONDS
-	else:
-		record["reconnect_deadline"] = Time.get_unix_time_from_system() + RECONNECT_SECONDS
-	players[player_id] = record
-	if server_bodies.has(player_id):
-		server_bodies[player_id].move_input = Vector2.ZERO
-		server_bodies[player_id].sprinting = false
-	_assign_host_if_needed()
-	if is_eos_p2p:
-		eos_membership_refresh_requested.emit()
-	if not match_running:
-		_broadcast_lobby_state()
+	_mark_player_disconnected(player_id)
 
 
 @rpc("any_peer", "call_remote", "reliable")
@@ -680,6 +664,11 @@ func _accept_join_request(peer_id: int, claims: Dictionary, display_name: String
 			return
 		if old_peer_active and old_peer_id != peer_id and multiplayer.multiplayer_peer != null:
 			multiplayer.multiplayer_peer.disconnect_peer(old_peer_id)
+		# Keep the peer -> player map in sync with the new connection, otherwise a
+		# later disconnect on the new peer id cannot find and free this slot.
+		if old_peer_id > 0 and old_peer_id != peer_id:
+			peer_to_player.erase(old_peer_id)
+		peer_to_player[peer_id] = player_id
 		existing["peer_id"] = peer_id
 		existing["connected"] = true
 		existing["reconnect_deadline"] = 0.0
@@ -687,7 +676,7 @@ func _accept_join_request(peer_id: int, claims: Dictionary, display_name: String
 		existing["color"] = _available_color(color_index, player_id)
 		players[player_id] = existing
 	else:
-		if players.size() >= int(_server_settings["max_players"]):
+		if _occupied_slot_count() >= int(_server_settings["max_players"]):
 			_reject_join(peer_id, "Lobby is full.")
 			return
 		if bool(claims.get("host", false)):
@@ -957,6 +946,10 @@ func _remove_test_bots() -> void:
 func _request_start_for_player(player_id: String) -> void:
 	if not is_server or match_running or not players.has(player_id) or not bool(players[player_id].get("host", false)):
 		return
+	var host_record: Dictionary = players[player_id]
+	host_record["ready"] = true
+	players[player_id] = host_record
+	_broadcast_lobby_state()
 	var connected := _connected_players()
 	if connected.size() < minimum_players:
 		_emit_start_failure(player_id, "Need %d connected players to start." % minimum_players)
@@ -2144,13 +2137,12 @@ func _broadcast_lobby_state() -> void:
 
 
 func _emit_start_failure(player_id: String, message: String) -> void:
-	if _is_local_server_player(player_id):
-		join_failed.emit(message)
-		return
-	var record: Dictionary = players.get(player_id, {})
-	var peer_id := int(record.get("peer_id", 0))
-	if _is_peer_connected(peer_id):
-		receive_join_failure.rpc_id(peer_id, message)
+	status_changed.emit(message)
+	if not _is_local_server_player(player_id):
+		var record: Dictionary = players.get(player_id, {})
+		var peer_id := int(record.get("peer_id", 0))
+		if _is_peer_connected(peer_id):
+			receive_color_change_failure.rpc_id(peer_id, message)
 
 
 func _encode_state_packet(state: Dictionary) -> Array:
@@ -2229,6 +2221,66 @@ func _assign_host_if_needed() -> void:
 		var record: Dictionary = players[player_id]
 		record["host"] = record["player_id"] == connected[0]["player_id"]
 		players[player_id] = record
+
+
+func _occupied_slot_count() -> int:
+	# Capacity is derived from confirmed, live peers (plus any simulated bots),
+	# never from a raw player-record count that can retain ghost entries.
+	var count := 0
+	var active_peers: Array = multiplayer.get_peers() if multiplayer.multiplayer_peer != null else []
+	for player_id: String in players:
+		var record: Dictionary = players[player_id]
+		if bool(record.get("bot", false)):
+			count += 1
+			continue
+		if not bool(record.get("connected", false)):
+			continue
+		var peer_id := int(record.get("peer_id", 0))
+		if peer_id == 1 or peer_id in active_peers:
+			count += 1
+	return count
+
+
+func _mark_player_disconnected(player_id: String) -> void:
+	if not players.has(player_id):
+		return
+	var record: Dictionary = players[player_id]
+	var peer_id := int(record.get("peer_id", 0))
+	peer_to_player.erase(peer_id)
+	record["connected"] = false
+	record["peer_id"] = 0
+	record["ready"] = false
+	if is_eos_p2p and not match_running:
+		record["reconnect_deadline"] = Time.get_unix_time_from_system() + EOS_MEMBERSHIP_GRACE_SECONDS
+	else:
+		record["reconnect_deadline"] = Time.get_unix_time_from_system() + RECONNECT_SECONDS
+	players[player_id] = record
+	if server_bodies.has(player_id):
+		server_bodies[player_id].move_input = Vector2.ZERO
+		server_bodies[player_id].sprinting = false
+	_assign_host_if_needed()
+	if is_eos_p2p:
+		eos_membership_refresh_requested.emit()
+	if not match_running:
+		_broadcast_lobby_state()
+
+
+func _reap_stale_peers() -> void:
+	# EOS P2P can drop a link without emitting peer_disconnected (force-closed
+	# app, backgrounded device, network switch). Any player whose peer is no
+	# longer present in get_peers() must release its slot, otherwise the room
+	# becomes permanently "full" while looking empty.
+	var active_peers: Array = multiplayer.get_peers() if multiplayer.multiplayer_peer != null else []
+	for player_id: String in players:
+		if player_id == local_player_id:
+			continue
+		var record: Dictionary = players[player_id]
+		if bool(record.get("bot", false)) or not bool(record.get("connected", false)):
+			continue
+		var peer_id := int(record.get("peer_id", 0))
+		if peer_id > 1 and peer_id not in active_peers:
+			log_network_event("REAP_STALE_PEER player=" + player_id + " peer=" + str(peer_id))
+			_mark_player_disconnected(player_id)
 
 
 func _remove_player(player_id: String) -> void:

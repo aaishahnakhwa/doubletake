@@ -134,7 +134,7 @@ func _build_menu() -> void:
 	var title := _label("DOUBLE TAKE", 34, Color("#f4d7a7"))
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	column.add_child(title)
-	var subtitle := _label("PRIVATE CAMP LOBBY", 16, Color("#a7c957"))
+	var subtitle := _label("PRIVATE CAMP LOBBY  •  BUILD 10", 16, Color("#a7c957"))
 	subtitle.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	column.add_child(subtitle)
 	column.add_child(_label("CAMPER NAME", 14, Color("#fffbe7")))
@@ -618,6 +618,18 @@ func _select_killer(index: int) -> void:
 func set_status(message: String, is_error := false) -> void:
 	status_label.text = message
 	status_label.add_theme_color_override("font_color", Color("#ff9b8f") if is_error else Color("#f4d7a7"))
+
+
+func show_error_dialog(message: String) -> void:
+	var dialog := AcceptDialog.new()
+	dialog.title = "Multiplayer error — Build 10"
+	dialog.dialog_text = message
+	dialog.min_size = Vector2i(760, 260)
+	dialog.exclusive = true
+	dialog.confirmed.connect(dialog.queue_free)
+	dialog.canceled.connect(dialog.queue_free)
+	root.add_child(dialog)
+	dialog.popup_centered()
 
 
 func set_color_notice(message: String, is_error := false) -> void:
@@ -1146,4 +1158,3 @@ func _save_wardrobe() -> void:
 func _close_wardrobe_modal() -> void:
 	if is_instance_valid(wardrobe_modal):
 		wardrobe_modal.visible = false
-

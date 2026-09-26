@@ -71,7 +71,10 @@ public class GodotApp extends GodotActivity {
 
 	@Override
 	public void onCreate(Bundle savedInstanceState) {
-		EOSSDK.init(getActivity());
+		// Pass the concrete Activity directly so EOS always stores Android's
+		// Activity/JavaVM before the native SDK is initialized by Godot.
+		EOSSDK.init(this);
+		Log.i("DoubleTakeEOS", "EOS Android SDK initialized: " + (EOSSDK.GetActivity() != null));
 		SplashScreen splashScreen = SplashScreen.installSplashScreen(this);
 		EdgeToEdge.enable(this);
 		super.onCreate(savedInstanceState);

@@ -11,12 +11,17 @@ signal room_code_ready(code: String)
 
 const BUCKET_ID := "double_take_v1"
 const ROOM_CODE_ATTRIBUTE := "double_take_code"
+const GAME_VERSION_ATTRIBUTE := "game_version"
+const GAME_VERSION := "0.2.0"
+const HOST_PUID_ATTRIBUTE := "host_puid"
 const SOCKET_ID := "DoubleTakeP2PV1"
 const CODE_ALPHABET := "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 const MAX_PLAYERS := 6
 const MAX_JOIN_RETRIES := 3
 const FAIL_SAFE_TIMEOUT_SECONDS := 24.0
 const P2P_HANDSHAKE_GUARD_SECONDS := 12.0
+const CREATED_AT_ATTRIBUTE := "created_at"
+const STALE_LOBBY_SECONDS := 120.0
 
 var current_lobby: HLobby
 var session: Node
@@ -26,6 +31,16 @@ var operation_active := false
 var leaving_lobby := false
 
 var _join_operation_id := 0
+var _last_eos_setup_log := ""
+
+
+func _notification(what: int) -> void:
+	if what == NOTIFICATION_WM_CLOSE_REQUEST or what == NOTIFICATION_PREDELETE:
+		if current_lobby != null and current_lobby.is_valid():
+			if current_lobby.is_owner():
+				current_lobby.destroy_async()
+			else:
+				current_lobby.leave_async()
 
 
 func create_room(network_session: Node, display_name: String, color_index: int) -> void:
@@ -62,8 +77,24 @@ func create_room(network_session: Node, display_name: String, color_index: int) 
 	if current_lobby == null:
 		_failed("Could not create the internet lobby.")
 		return
+
+	# Pre-publish code collision check: only treat *live* lobbies (recently
+	# created) as collisions. Stale lobbies left behind by crashed hosts must
+	# not permanently block a fresh code.
 	var code := _new_room_code()
+	for collision_check in range(5):
+		var existing = await HLobbies.search_by_attribute_async({"key": ROOM_CODE_ATTRIBUTE, "value": code})
+		if op_id != _join_operation_id:
+			return
+		if _has_live_lobby(existing):
+			code = _new_room_code()
+		else:
+			break
+
 	current_lobby.add_attribute(ROOM_CODE_ATTRIBUTE, code)
+	current_lobby.add_attribute(GAME_VERSION_ATTRIBUTE, GAME_VERSION)
+	current_lobby.add_attribute(HOST_PUID_ATTRIBUTE, HAuth.product_user_id)
+	current_lobby.add_attribute(CREATED_AT_ATTRIBUTE, str(Time.get_unix_time_from_system()))
 	current_lobby.add_current_member_attribute("name", display_name)
 	current_lobby.add_current_member_attribute("color", clampi(color_index, 0, 5))
 	if not await current_lobby.update_async():
@@ -142,6 +173,10 @@ func _execute_join_with_retry(op_id: int, clean_code: String, display_name: Stri
 		if search_attempt < 5:
 			await get_tree().create_timer(0.4).timeout
 
+	# Several lobbies can carry the same code (a stale lobby from a crashed host
+	# and the current room). Prefer the newest so players join the live room.
+	matches = _newest_first(matches)
+
 	if op_id != _join_operation_id or not operation_active:
 		return
 
@@ -159,14 +194,20 @@ func _execute_join_with_retry(op_id: int, clean_code: String, display_name: Stri
 	for candidate in matches:
 		if op_id != _join_operation_id or not operation_active:
 			return
+		if candidate == null:
+			continue
 		joined_lobby = await HLobbies.join_async(candidate)
 		if joined_lobby != null and joined_lobby.is_valid():
 			break
 		joined_lobby = null
+	if op_id != _join_operation_id or not operation_active:
+		if joined_lobby != null:
+			joined_lobby.leave_async()
+		return
 
 	if joined_lobby == null:
 		if attempt < MAX_JOIN_RETRIES:
-			status_changed.emit("Room slot busy or full. Retrying matchmaking (%d/%d)…" % [attempt + 1, MAX_JOIN_RETRIES])
+			status_changed.emit("Room slot busy. Retrying matchmaking (%d/%d)…" % [attempt + 1, MAX_JOIN_RETRIES])
 			await get_tree().create_timer(0.8).timeout
 			_execute_join_with_retry(op_id, clean_code, display_name, color_index, attempt + 1)
 			return
@@ -249,7 +290,9 @@ func _start_p2p_handshake_guard(op_id: int, clean_code: String, display_name: St
 
 
 func leave_room() -> void:
-	_join_operation_id += 1
+	# Cleanup must never invalidate the in-flight operation that requested it.
+	# Only create_room/join_room/_failed advance _join_operation_id, otherwise a
+	# retry that leaves a lobby first would disarm its own timers and lock up.
 	operation_active = false
 	if leaving_lobby:
 		return
@@ -309,8 +352,16 @@ func _ensure_signed_in(display_name: String) -> bool:
 			return false
 	status_changed.emit("Signing in to multiplayer…")
 	if not eos_ready:
+		_last_eos_setup_log = ""
+		if not HPlatform.log_msg.is_connected(_on_eos_setup_log):
+			HPlatform.log_msg.connect(_on_eos_setup_log)
 		if not await HPlatform.setup_eos_async(credentials):
-			_failed("Could not initialize Epic Online Services. Check the configured IDs.")
+			var reason := HPlatform.last_setup_error
+			if reason.is_empty():
+				reason = "Android EOS setup returned without creating a platform."
+			if not _last_eos_setup_log.is_empty():
+				reason += " Native: " + _last_eos_setup_log
+			_failed("Could not initialize Epic Online Services. " + reason)
 			return false
 		eos_ready = true
 		HP2P.set_relay_control(EOS.P2P.RelayControl.AllowRelays)
@@ -333,6 +384,15 @@ func _ensure_signed_in(display_name: String) -> bool:
 	return true
 
 
+func _on_eos_setup_log(message: EOS.Logging.LogMessage) -> void:
+	var text := message.message.strip_edges()
+	if text.is_empty():
+		return
+	print("EOS [%s]: %s" % [message.category, text])
+	# Retain the latest native explanation without overflowing the lobby UI.
+	_last_eos_setup_log = text.left(220)
+
+
 static func clear_eos_cache() -> void:
 	var profiles_root := ProjectSettings.globalize_path("user://eos-instance-profiles")
 	if DirAccess.dir_exists_absolute(profiles_root):
@@ -342,13 +402,26 @@ static func clear_eos_cache() -> void:
 		DirAccess.remove_absolute(eosg_cache)
 
 
+const DEFAULT_CREDENTIALS := {
+	"product_id": "e4918c75285240b68ef3171959c2054b",
+	"sandbox_id": "3884cd90dfb847e9b8e515dce0395370",
+	"deployment_id": "378bb80a63e743d7a4eb5d2e9b50804d",
+	"client_id": "xyza78916zYVZYOAlqCi5G7TaXA8Vhq2",
+	"client_secret": "UCqoGQmZU64w0bTKqJt10IWyCOXrtCTwmTz3ZZZDFoI",
+	"encryption_key": "1111111111111111111111111111111111111111111111111111111111111111"
+}
+
+
 func _credential(key: String) -> String:
 	var config := ConfigFile.new()
 	if config.load("res://eos_credentials.cfg") == OK:
 		var from_file := str(config.get_value("eos", key, "")).strip_edges()
 		if not from_file.is_empty():
 			return from_file
-	return str(ProjectSettings.get_setting("double_take/eos_" + key, "")).strip_edges()
+	var from_settings := str(ProjectSettings.get_setting("double_take/eos_" + key, "")).strip_edges()
+	if not from_settings.is_empty():
+		return from_settings
+	return str(DEFAULT_CREDENTIALS.get(key, "")).strip_edges()
 
 
 func _watch_lobby() -> void:
@@ -416,6 +489,33 @@ func _on_lobby_closed() -> void:
 	_failed("The host closed the room. Ask them for a new code.")
 
 
+func _lobby_created_at(lobby) -> float:
+	if lobby == null:
+		return 0.0
+	var attr = lobby.get_attribute(CREATED_AT_ATTRIBUTE)
+	var value := str(attr.get("value", "")).strip_edges()
+	return value.to_float() if not value.is_empty() else 0.0
+
+
+func _has_live_lobby(lobbies) -> bool:
+	if lobbies == null or lobbies.is_empty():
+		return false
+	var now := Time.get_unix_time_from_system()
+	for candidate in lobbies:
+		var created_at := _lobby_created_at(candidate)
+		if created_at > 0.0 and now - created_at < STALE_LOBBY_SECONDS:
+			return true
+	return false
+
+
+func _newest_first(lobbies) -> Array:
+	if lobbies == null or lobbies.size() <= 1:
+		return lobbies
+	var sorted: Array = lobbies.duplicate()
+	sorted.sort_custom(func(a, b) -> bool: return _lobby_created_at(a) > _lobby_created_at(b))
+	return sorted
+
+
 func _new_room_code() -> String:
 	var code := ""
 	for _index in 6:
@@ -429,4 +529,3 @@ func _failed(message: String) -> void:
 	if current_lobby != null:
 		leave_room()
 	failed.emit(message)
-	status_changed.emit(message)

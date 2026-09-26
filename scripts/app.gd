@@ -17,6 +17,7 @@ var test_movement_active := false
 var test_start_position := Vector2.INF
 var eos_profile_port_guard: TCPServer
 var eos_profile_slot := 1
+var pending_online_action := ""
 
 
 func _ready() -> void:
@@ -65,6 +66,10 @@ func _exit_tree() -> void:
 func _claim_eos_instance_profile() -> void:
 	var profiles_root := ProjectSettings.globalize_path("user://eos-instance-profiles")
 	DirAccess.make_dir_recursive_absolute(profiles_root)
+	if OS.get_name() == "Android":
+		HPlatform.cache_directory = profiles_root.path_join("android")
+		DirAccess.make_dir_recursive_absolute(HPlatform.cache_directory)
+		return
 	for slot in range(1, 33):
 		# Holding a loopback TCP port is an OS-level, crash-safe, cross-process
 		# lock. It prevents two game windows from ever selecting the same cache.
@@ -152,7 +157,11 @@ func _build_client_ui() -> void:
 func _create_room(display_name: String, color_index: int) -> void:
 	pending_name = _clean_name(display_name)
 	pending_color = color_index
+	pending_online_action = "create"
 	ProjectSettings.set_setting("double_take/player_name", pending_name)
+	if OS.is_debug_build() and cli.has("simulate-eos-failure"):
+		_on_eos_lobby_failed("Could not initialize Epic Online Services. Simulated for fallback test.")
+		return
 	eos_lobby.create_room(session, pending_name, pending_color)
 
 
@@ -165,11 +174,14 @@ func _create_lan_room(display_name: String, color_index: int) -> void:
 	var error: int = session.start_lan_host(address, player_id, pending_name, pending_color, 2)
 	if error != OK:
 		_on_eos_lobby_failed("Could not create the Local Wi-Fi lobby. Close other hosts and try again.")
+	else:
+		pending_online_action = ""
 
 
 func _join_room(code: String, display_name: String, color_index: int) -> void:
 	pending_name = _clean_name(display_name)
 	pending_color = color_index
+	pending_online_action = "join"
 	ProjectSettings.set_setting("double_take/player_name", pending_name)
 	eos_lobby.join_room(session, code, pending_name, pending_color)
 
@@ -204,6 +216,7 @@ func _best_lan_address() -> String:
 
 
 func _on_join_succeeded(state: Dictionary) -> void:
+	pending_online_action = ""
 	print("PHASE2_JOINED player=%s room=%s" % [pending_name, state.get("room_code", "")])
 	if is_instance_valid(lobby_ui):
 		lobby_ui.show_lobby(session.local_player_id, state, pending_color)
@@ -357,8 +370,17 @@ func _on_status(message: String) -> void:
 
 
 func _on_eos_lobby_failed(message: String) -> void:
+	print("MULTIPLAYER_ERROR: ", message)
 	if is_instance_valid(lobby_ui):
+		if message.begins_with("Could not initialize Epic Online Services") and pending_online_action == "create":
+			pending_online_action = ""
+			lobby_ui.set_status("Internet service unavailable. Starting a Local Wi-Fi game instead…")
+			_create_lan_room(pending_name, pending_color)
+			return
+		pending_online_action = ""
 		lobby_ui.set_status(message, true)
+		if message.begins_with("Could not initialize Epic Online Services"):
+			lobby_ui.show_error_dialog(message + "\n\nTo join on the same Wi-Fi, enter the host's displayed IP address instead of a room code.")
 
 
 func _local_is_host(state: Dictionary) -> bool:

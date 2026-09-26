@@ -48,6 +48,9 @@ var tick_budget_in_milliseconds: int
 var task_network_timeout_seconds = null # float
 ## Configures RTC behavior upon entering to any background application statuses See [enum EOS.Platform.RTCBackgroundMode]
 var rtc_options_background_mode = null
+## Human-readable setup failure retained for callers. Platform creation only
+## returns a bool, so without this callers can only show a generic error.
+var last_setup_error: String = ""
 
 #endregion
 
@@ -72,9 +75,11 @@ func _ready() -> void:
 
 ## Easy setup for EOS. Returns true if EOS setup is success.
 func setup_eos_async(p_creds: HCredentials) -> bool:
+	last_setup_error = "EOS SDK initialization did not finish."
 	_log.debug("Setting up EOS")
 	
 	if not p_creds.product_name:
+		last_setup_error = "Product name is empty."
 		_log.error("HCredentials.product_name cannot be empty")
 		return false
 	
@@ -83,8 +88,10 @@ func setup_eos_async(p_creds: HCredentials) -> bool:
 	init_opts.product_version = p_creds.product_version
 	
 	var init_ret: EOS.Result = await initialize_async(init_opts)
-	if not EOS.is_success(init_ret):
+	if not (EOS.is_success(init_ret) or init_ret == EOS.Result.AlreadyConfigured):
+		last_setup_error = "EOS SDK initialization failed: %s" % EOS.result_str(init_ret)
 		return false
+	last_setup_error = "EOS SDK initialized; Android platform creation did not finish."
 
 	var create_opts = EOS.Platform.CreateOptions.new()
 	create_opts.product_id = p_creds.product_id
@@ -117,8 +124,9 @@ func setup_eos_async(p_creds: HCredentials) -> bool:
 	
 	var is_success: bool = await create_platform_async(create_opts)
 	if not is_success:
+		last_setup_error = "EOS SDK initialized, but Android platform creation failed."
 		return false
-	
+	last_setup_error = ""
 	return true
 
 
@@ -128,8 +136,8 @@ func initialize_async(opts: EOS.Platform.InitializeOptions) -> EOS.Result:
 	var res: EOS.Result = EOS.Platform.PlatformInterface.initialize(opts)
 	
 	var retry_count = INITIALIZE_RETRY_COUNT
-	while not EOS.is_success(res) and retry_count > 0:
-		if not EOS.is_success(res) and retry_count > 0:
+	while not (EOS.is_success(res) or res == EOS.Result.AlreadyConfigured) and retry_count > 0:
+		if not (EOS.is_success(res) or res == EOS.Result.AlreadyConfigured) and retry_count > 0:
 			_log.debug("Failed to initialize EOS SDK: result_code=%s, retry_count=%s" % [EOS.result_str(res), INITIALIZE_RETRY_COUNT - retry_count + 1])
 		
 		res = EOS.Platform.PlatformInterface.initialize(opts)
@@ -167,7 +175,7 @@ func create_platform_async(opts: EOS.Platform.CreateOptions) -> bool:
 	var retry_count = CREATE_RETRY_COUNT
 	while not EOS.is_success(res) and retry_count > 0:
 		if not EOS.is_success(res) and retry_count > 0:
-			_log.debug("Failed to create EOS Platform: result_code=%s, retry_count=%s" % [EOS.result_str(res), CREATE_RETRY_COUNT - retry_count + 1])
+			_log.debug("Failed to create EOS Platform: retry_count=%s" % [CREATE_RETRY_COUNT - retry_count + 1])
 		
 		res = EOS.Platform.PlatformInterface.create(opts)
 		retry_count -= 1
@@ -175,7 +183,7 @@ func create_platform_async(opts: EOS.Platform.CreateOptions) -> bool:
 		
 	
 	if not EOS.is_success(res):
-		_log.error("Failed to create EOS Platform: %s" % EOS.result_str(res))
+		_log.error("Failed to create EOS Platform: native create returned false")
 		return res
 	
 	platform_created.emit()
