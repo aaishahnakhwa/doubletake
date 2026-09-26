@@ -876,7 +876,11 @@ func set_task_state(state: Dictionary) -> void:
 	task_assignments = state.get("tasks", []).duplicate(true)
 	shared_completed = int(state.get("completed", 0))
 	shared_total = int(state.get("total", 0))
-	section_title.text = "YOUR TASKS" if not task_assignments.is_empty() else "KILLER OBJECTIVES"
+	_refresh_camper_task_display()
+
+
+func _refresh_camper_task_display() -> void:
+	section_title.text = "YOUR TASKS"
 	task_progress.visible = true
 	task_progress_label.visible = true
 	task_list.visible = not task_card_collapsed
@@ -897,13 +901,25 @@ func set_task_state(state: Dictionary) -> void:
 		if not t_zone.is_empty() and not done:
 			line += "  [📍 %s]" % t_zone
 		lines.append(line)
-	if lines.is_empty():
-		lines.append("• Sabotage Camp Stations\n• Eliminate campers without being caught")
-	task_list.text = "\n".join(lines)
 	var incomplete_ids: Array[String] = []
 	for assignment: Dictionary in task_assignments:
 		if not bool(assignment.get("completed", false)):
 			incomplete_ids.append(str(assignment.get("id", "")))
+	if _is_living_camper():
+		for sabotage: Dictionary in phase4_state.get("sabotages", []):
+			if not bool(sabotage.get("active", false)):
+				continue
+			var sabotage_id := str(sabotage.get("id", ""))
+			var repair_zone: String = TASK_ZONES.get(sabotage_id, "")
+			var repair_line := "⚠  REPAIR: " + str(sabotage.get("effect", "Damaged camp system"))
+			if not repair_zone.is_empty():
+				repair_line += "  [📍 %s]" % repair_zone
+			lines.append(repair_line)
+			if sabotage_id not in incomplete_ids:
+				incomplete_ids.append(sabotage_id)
+	if lines.is_empty():
+		lines.append("No personal tasks remaining.")
+	task_list.text = "\n".join(lines)
 	minimap.set_task_ids(incomplete_ids)
 	header_status.text = "TASKS %d%%" % _task_percent()
 	_layout()
@@ -948,6 +964,8 @@ func set_phase4_state(state: Dictionary) -> void:
 		task_progress.value = 0 if task_assignments.is_empty() else 100.0 * completed / task_assignments.size()
 		task_progress_label.text = "SABOTAGES  %d/%d" % [completed, task_assignments.size()]
 		_layout()
+	else:
+		_refresh_camper_task_display()
 	var blackout := false
 	var active_effects := PackedStringArray()
 	for sabotage: Dictionary in phase4_state.get("sabotages", []):

@@ -13,6 +13,13 @@ const KillCinematicScript = preload("res://scripts/kill_cinematic.gd")
 const MeetingScreenScript = preload("res://scripts/meeting_screen.gd")
 const EndGameScreenScript = preload("res://scripts/end_game_screen.gd")
 
+const LOCAL_RECONCILE_DEAD_ZONE := 72.0
+const LOCAL_HARD_SNAP_DISTANCE := 220.0
+const LOCAL_RECONCILE_SPEED := 90.0
+const REMOTE_EXTRAPOLATION_LIMIT := 0.12
+const REMOTE_SMOOTHING_SPEED := 18.0
+const REMOTE_HARD_SNAP_DISTANCE := 260.0
+
 var session: Node
 var initial_state: Dictionary = {}
 var world: Node2D
@@ -22,6 +29,11 @@ var hud: CanvasLayer
 var visibility: Node2D
 var actor_by_id: Dictionary = {}
 var target_positions: Dictionary = {}
+var remote_velocities: Dictionary = {}
+var last_snapshot_server_time := -1
+var latest_snapshot_received_at := 0
+var local_authoritative_position := Vector2.ZERO
+var has_local_authoritative_position := false
 var send_elapsed := 0.0
 var last_station_name := ""
 var current_minigame: CanvasLayer
@@ -73,7 +85,7 @@ func _ready() -> void:
 	session.meeting_ended.connect(_on_meeting_ended)
 	hud.kill_requested.connect(session.request_kill)
 	hud.sabotage_requested.connect(_begin_sabotage_minigame)
-	hud.repair_requested.connect(session.request_repair)
+	hud.repair_requested.connect(_begin_repair_minigame)
 	hud.body_report_requested.connect(session.report_nearby_body)
 	hud.emergency_meeting_requested.connect(_on_emergency_meeting_requested)
 	hud.is_host = session.is_server
@@ -88,6 +100,7 @@ func _ready() -> void:
 func _process(delta: float) -> void:
 	if not is_instance_valid(player):
 		return
+	_reconcile_local_player(delta)
 	visibility.global_position = player.global_position
 	hud.update_player_position(player.global_position)
 	hud.update_player_screen_position(player.get_global_transform_with_canvas().origin)
@@ -106,15 +119,25 @@ func _process(delta: float) -> void:
 			continue
 		var actor: CharacterBody2D = actor_by_id[player_id]
 		var target: Vector2 = target_positions[player_id]
-		var dist := actor.global_position.distance_to(target)
+		var remote_velocity: Vector2 = remote_velocities.get(player_id, Vector2.ZERO)
+		var snapshot_age := clampf(
+			float(Time.get_ticks_msec() - latest_snapshot_received_at) / 1000.0,
+			0.0,
+			REMOTE_EXTRAPOLATION_LIMIT
+		)
+		var render_target := target + remote_velocity * snapshot_age
+		var dist := actor.global_position.distance_to(render_target)
 		if dist > 3.0:
-			actor.remote_direction = actor.global_position.direction_to(target)
-			var move_speed := dist / maxf(delta, 0.001)
-			actor.remote_running = move_speed > 200.0
+			actor.remote_direction = remote_velocity.normalized() if remote_velocity.length_squared() > 25.0 else actor.global_position.direction_to(render_target)
+			actor.remote_running = remote_velocity.length() > 200.0
 		else:
 			actor.remote_direction = Vector2.ZERO
 			actor.remote_running = false
-		actor.global_position = actor.global_position.lerp(target, minf(1.0, delta * 14.0))
+		if dist >= REMOTE_HARD_SNAP_DISTANCE:
+			actor.global_position = render_target
+		else:
+			var smoothing_weight := 1.0 - exp(-REMOTE_SMOOTHING_SPEED * delta)
+			actor.global_position = actor.global_position.lerp(render_target, smoothing_weight)
 
 
 func _physics_process(delta: float) -> void:
@@ -158,24 +181,51 @@ func _spawn_players() -> void:
 		actors.add_child(actor)
 		actor_by_id[player_id] = actor
 		target_positions[player_id] = actor.global_position
+		remote_velocities[player_id] = Vector2.ZERO
 		if actor.is_local:
 			player = actor
+			local_authoritative_position = actor.global_position
+			has_local_authoritative_position = true
 
 
 func _on_snapshot(snapshot: Dictionary) -> void:
 	var positions: Dictionary = snapshot.get("positions", {})
+	var server_time := int(snapshot.get("server_time", -1))
+	var snapshot_delta := 0.05
+	if last_snapshot_server_time >= 0 and server_time > last_snapshot_server_time:
+		snapshot_delta = clampf(float(server_time - last_snapshot_server_time) / 1000.0, 0.016, 0.25)
+	latest_snapshot_received_at = Time.get_ticks_msec()
 	for player_id: String in positions:
 		if not actor_by_id.has(player_id):
 			continue
 		var server_position: Vector2 = positions[player_id]
+		var previous_target: Vector2 = target_positions.get(player_id, server_position)
 		target_positions[player_id] = server_position
 		if player_id == session.local_player_id:
-			var actor: CharacterBody2D = actor_by_id[player_id]
-			var distance := actor.global_position.distance_to(server_position)
-			if distance > 100.0:
-				actor.global_position = server_position
-			elif distance > 5.0:
-				actor.global_position = actor.global_position.lerp(server_position, 0.18)
+			local_authoritative_position = server_position
+			has_local_authoritative_position = true
+			continue
+		var measured_velocity := (server_position - previous_target) / snapshot_delta
+		if measured_velocity.length_squared() < 16.0:
+			measured_velocity = Vector2.ZERO
+		var previous_velocity: Vector2 = remote_velocities.get(player_id, Vector2.ZERO)
+		remote_velocities[player_id] = previous_velocity.lerp(measured_velocity, 0.55)
+	if server_time >= 0:
+		last_snapshot_server_time = server_time
+
+
+func _reconcile_local_player(delta: float) -> void:
+	if not has_local_authoritative_position or not is_instance_valid(player):
+		return
+	var error := local_authoritative_position - player.global_position
+	var distance := error.length()
+	if distance >= LOCAL_HARD_SNAP_DISTANCE:
+		player.global_position = local_authoritative_position
+		return
+	if distance <= LOCAL_RECONCILE_DEAD_ZONE:
+		return
+	var correction := minf(distance - LOCAL_RECONCILE_DEAD_ZONE, LOCAL_RECONCILE_SPEED * delta)
+	player.global_position += error / distance * correction
 
 
 func _inspect_station() -> void:
@@ -192,7 +242,7 @@ func _inspect_station() -> void:
 		return
 	var sabotage := _sabotage_at_station(station)
 	if not sabotage.is_empty() and bool(sabotage.get("active", false)) and _is_living_camper():
-		session.request_repair(str(sabotage["id"]))
+		_begin_repair_minigame(str(sabotage["id"]))
 		return
 	if not sabotage.is_empty() and _is_living_killer() and _is_killer_objective(str(sabotage["id"])):
 		_begin_sabotage_minigame(str(sabotage["id"]))
@@ -252,6 +302,31 @@ func _on_sabotage_minigame_completed(sabotage_id: String) -> void:
 	current_minigame = null
 	current_sabotage_id = ""
 	session.request_sabotage(sabotage_id)
+
+
+func _begin_repair_minigame(sabotage_id: String) -> void:
+	if is_instance_valid(current_minigame) or not _is_living_camper():
+		return
+	var sabotage := _sabotage_by_id(sabotage_id)
+	if sabotage.is_empty() or not bool(sabotage.get("active", false)):
+		return
+	current_sabotage_id = sabotage_id
+	current_minigame = TaskMinigameScript.new()
+	current_minigame.setup(sabotage_id, false, true)
+	current_minigame.completed.connect(_on_repair_minigame_completed)
+	current_minigame.closed.connect(_on_minigame_closed)
+	add_child(current_minigame)
+	player.input_locked = true
+	player.touch_direction = Vector2.ZERO
+	hud.show_toast("Complete the emergency repair.")
+
+
+func _on_repair_minigame_completed(sabotage_id: String) -> void:
+	if is_instance_valid(player):
+		player.input_locked = false
+	current_minigame = null
+	current_sabotage_id = ""
+	session.request_repair(sabotage_id)
 
 
 func _on_minigame_closed() -> void:
@@ -372,6 +447,13 @@ func _sabotage_at_station(station: Dictionary) -> Dictionary:
 	return {}
 
 
+func _sabotage_by_id(sabotage_id: String) -> Dictionary:
+	for sabotage: Dictionary in phase4_state.get("sabotages", []):
+		if str(sabotage.get("id", "")) == sabotage_id:
+			return sabotage
+	return {}
+
+
 func _is_living_killer() -> bool:
 	return session.local_role == "Killer" and not bool(phase4_state.get("ghost", false))
 
@@ -447,7 +529,7 @@ func _on_match_ended(winner: String, reason: String, outcome: Dictionary = {}) -
 func _can_call_emergency_meeting() -> bool:
 	if not is_instance_valid(player) or is_instance_valid(active_meeting_screen):
 		return false
-	if bool(phase4_state.get("ghost", false)):
+	if bool(phase4_state.get("ghost", false)) or bool(phase4_state.get("ejected", false)):
 		return false
 	return world.is_near_emergency_button(player.global_position)
 
@@ -462,6 +544,9 @@ func _on_bell_clicked() -> void:
 
 
 func _on_emergency_meeting_requested() -> void:
+	if not _can_call_emergency_meeting():
+		hud.show_toast("Ejected players and ghosts cannot call meetings.")
+		return
 	hud.show_ringing_bell_cinematic(1.2)
 	if is_instance_valid(world) and is_instance_valid(world.bell):
 		world.bell.ring(1.2)

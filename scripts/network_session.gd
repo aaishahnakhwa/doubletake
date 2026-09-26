@@ -103,8 +103,8 @@ var sabotage_state: Dictionary = {}
 var bodies: Dictionary = {}
 # Debug-only launch option used for offline/solo Phase 4 verification.
 var force_killer_for_testing := false
-# Playtest option: keep the room host on the Camper side when another player
-# (including a test bot) is available to take the Killer role.
+# Playtest option: keep the room host on the Camper side when another real
+# player is available to take the Killer role. Test bots are always Campers.
 var force_camper_for_testing := false
 # Used only by the local same-PC test launcher. A normal EOS room leaves this
 # empty and still assigns roles randomly.
@@ -113,6 +113,10 @@ var shutdown_when_empty := false
 var server_had_connected_player := false
 var last_match_outcome: Dictionary = {}
 var chat_history: Array[Dictionary] = []
+var test_bot_paths: Dictionary = {}
+var test_bot_path_indices: Dictionary = {}
+var test_bot_wander_steps: Dictionary = {}
+var test_bot_retarget_at: Dictionary = {}
 
 
 func _ready() -> void:
@@ -328,6 +332,8 @@ func _reset_session_state() -> void:
 	kill_cooldown_until = 0.0
 	sabotage_state.clear()
 	bodies.clear()
+	chat_history.clear()
+	_clear_test_bot_movement()
 	current_match_state.clear()
 	current_lobby_state.clear()
 	eos_allowed_player_ids.clear()
@@ -497,6 +503,7 @@ func _process(_delta: float) -> void:
 	_process_sabotage_expiry(now)
 	_process_pending_eos_joins(now)
 	_reap_stale_peers()
+	_process_test_bot_movement(now)
 	var expired: Array[String] = []
 	for player_id: String in players:
 		var record: Dictionary = players[player_id]
@@ -1235,6 +1242,7 @@ func _start_match() -> void:
 	shared_tasks_total = 0
 	kill_cooldown_until = 0.0
 	bodies.clear()
+	_clear_test_bot_movement()
 	sabotage_state.clear()
 	for sabotage: Dictionary in SABOTAGES:
 		sabotage_state[str(sabotage["id"])] = {
@@ -1242,11 +1250,20 @@ func _start_match() -> void:
 			"effect": sabotage["effect"], "active": false, "until": 0.0
 		}
 	var connected := _connected_players()
-	var killer_index := randi_range(0, connected.size() - 1)
+	var eligible_killer_indices: Array[int] = []
+	for index in range(connected.size()):
+		if not bool(connected[index].get("bot", false)):
+			eligible_killer_indices.append(index)
+	# A playable lobby always has at least its real host. Keeping this guard here
+	# prevents a synthetic bot-only test from silently assigning a bot Killer.
+	if eligible_killer_indices.is_empty():
+		match_running = false
+		return
+	var killer_index := eligible_killer_indices[randi_range(0, eligible_killer_indices.size() - 1)]
 	var selected_killer_id := str(_server_settings.get("forced_killer_player_id", ""))
 	var has_selected_killer := false
 	if not selected_killer_id.is_empty():
-		for index in range(connected.size()):
+		for index in eligible_killer_indices:
 			if str(connected[index].get("player_id", "")) == selected_killer_id:
 				killer_index = index
 				has_selected_killer = true
@@ -1254,23 +1271,18 @@ func _start_match() -> void:
 	if has_selected_killer:
 		pass
 	elif force_killer_for_testing and not local_player_id.is_empty():
-		for index in range(connected.size()):
+		for index in eligible_killer_indices:
 			if str(connected[index].get("player_id", "")) == local_player_id:
 				killer_index = index
 				break
 	elif force_camper_for_testing and not local_player_id.is_empty() and connected.size() > 1:
-		for index in range(connected.size()):
+		for index in eligible_killer_indices:
 			if str(connected[index].get("player_id", "")) != local_player_id:
 				killer_index = index
 				break
 	elif not preferred_camper_player_id.is_empty() and connected.size() > 1:
-		for index in range(connected.size()):
+		for index in eligible_killer_indices:
 			if str(connected[index].get("player_id", "")) != preferred_camper_player_id:
-				killer_index = index
-				break
-	else:
-		for index in range(connected.size()):
-			if bool(connected[index].get("bot", false)):
 				killer_index = index
 				break
 	var public_players: Array[Dictionary] = []
@@ -1279,6 +1291,7 @@ func _start_match() -> void:
 		var player_id: String = record["player_id"]
 		record["role"] = "Killer" if index == killer_index else "Camper"
 		record["ghost"] = false
+		record["ejected"] = false
 		record["completed_tasks"] = []
 		record["sabotage_objectives"] = _assign_sabotage_objectives(player_id) if record["role"] == "Killer" else []
 		record["completed_sabotages"] = []
@@ -1390,7 +1403,10 @@ func _phase4_state_for(player_id: String) -> Dictionary:
 	var player_states := {}
 	for state_player_id: String in players:
 		var state_record: Dictionary = players[state_player_id]
-		player_states[state_player_id] = {"ghost": bool(state_record.get("ghost", false))}
+		player_states[state_player_id] = {
+			"ghost": bool(state_record.get("ghost", false)),
+			"ejected": bool(state_record.get("ejected", false))
+		}
 	var objectives: Array[Dictionary] = []
 	if str(record.get("role", "")) == "Killer":
 		for sabotage_id: String in record.get("sabotage_objectives", []):
@@ -1403,6 +1419,7 @@ func _phase4_state_for(player_id: String) -> Dictionary:
 	return {
 		"role": str(record.get("role", "Camper")),
 		"ghost": bool(record.get("ghost", false)),
+		"ejected": bool(record.get("ejected", false)),
 		"kill_cooldown": maxf(0.0, kill_cooldown_until - now) if str(record.get("role", "")) == "Killer" else 0.0,
 		"objectives": objectives,
 		"sabotages": public_sabotages,
@@ -1430,7 +1447,7 @@ func _broadcast_phase4_state() -> void:
 func _phase4_actor_error(player_id: String) -> String:
 	if not match_running or not players.has(player_id):
 		return "The match is not accepting that action."
-	if bool(players[player_id].get("ghost", false)):
+	if bool(players[player_id].get("ghost", false)) or bool(players[player_id].get("ejected", false)):
 		return "Ghosts cannot use this action."
 	if not server_bodies.has(player_id):
 		return "Your position is unavailable."
@@ -1734,7 +1751,7 @@ func _tally_votes_and_conclude() -> void:
 			var e_rec: Dictionary = players.get(ejected_id, {})
 			ejected_name = str(e_rec.get("name", "Camper"))
 			ejected_role = str(e_rec.get("role", "Camper"))
-			set_player_ghost(ejected_id, true)
+			set_player_ghost(ejected_id, true, true)
 	
 	var results := {
 		"votes": votes.duplicate(),
@@ -2066,6 +2083,7 @@ func _return_to_lobby() -> void:
 		var p: Dictionary = players[pid]
 		p["role"] = ""
 		p["ghost"] = false
+		p["ejected"] = false
 		p["ready"] = false
 		p["completed_tasks"] = []
 		p["tasks"] = []
@@ -2085,14 +2103,68 @@ func _return_to_lobby() -> void:
 			receive_return_to_lobby.rpc_id(peer_id)
 
 
-func set_player_ghost(player_id: String, ghost: bool = true) -> void:
+func set_player_ghost(player_id: String, ghost: bool = true, ejected: bool = false) -> void:
 	if not is_server or not players.has(player_id):
 		return
 	var record: Dictionary = players[player_id]
 	record["ghost"] = ghost
+	record["ejected"] = ejected if ghost else false
 	players[player_id] = record
+	if server_bodies.has(player_id):
+		server_bodies[player_id].move_input = Vector2.ZERO
+		server_bodies[player_id].sprinting = false
 	_broadcast_task_state()
 	_broadcast_phase4_state()
+
+
+func _clear_test_bot_movement() -> void:
+	test_bot_paths.clear()
+	test_bot_path_indices.clear()
+	test_bot_wander_steps.clear()
+	test_bot_retarget_at.clear()
+
+
+func _process_test_bot_movement(now: float) -> void:
+	if not match_running or not is_instance_valid(server_world):
+		return
+	for player_id: String in players:
+		var record: Dictionary = players[player_id]
+		if not bool(record.get("bot", false)) or not server_bodies.has(player_id):
+			continue
+		var body: CharacterBody2D = server_bodies[player_id]
+		if meeting_active or bool(record.get("ghost", false)):
+			body.move_input = Vector2.ZERO
+			body.sprinting = false
+			continue
+		var path: PackedVector2Array = test_bot_paths.get(player_id, PackedVector2Array())
+		var path_index := int(test_bot_path_indices.get(player_id, 0))
+		while path_index < path.size() and body.global_position.distance_to(path[path_index]) <= 18.0:
+			path_index += 1
+		if path_index >= path.size() or now >= float(test_bot_retarget_at.get(player_id, 0.0)):
+			_assign_test_bot_path(player_id, now)
+			path = test_bot_paths.get(player_id, PackedVector2Array())
+			path_index = int(test_bot_path_indices.get(player_id, 0))
+		test_bot_path_indices[player_id] = path_index
+		if path_index < path.size():
+			body.move_input = body.global_position.direction_to(path[path_index])
+		else:
+			body.move_input = Vector2.ZERO
+		body.sprinting = false
+
+
+func _assign_test_bot_path(player_id: String, now: float) -> void:
+	if not server_bodies.has(player_id) or server_world.route_nodes.is_empty():
+		return
+	var step := int(test_bot_wander_steps.get(player_id, 0)) + 1
+	test_bot_wander_steps[player_id] = step
+	var rng := RandomNumberGenerator.new()
+	rng.seed = hash("test-bot-wander:" + room_code + ":" + player_id + ":" + str(step))
+	var destination: Vector2 = server_world.route_nodes[rng.randi_range(0, server_world.route_nodes.size() - 1)]
+	var body: CharacterBody2D = server_bodies[player_id]
+	var path: PackedVector2Array = server_world.find_path(body.global_position, destination)
+	test_bot_paths[player_id] = path
+	test_bot_path_indices[player_id] = 1 if path.size() > 1 else 0
+	test_bot_retarget_at[player_id] = now + rng.randf_range(7.0, 12.0)
 
 
 func _player_id_for_peer(peer_id: int) -> String:

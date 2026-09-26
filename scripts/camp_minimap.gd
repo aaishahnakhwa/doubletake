@@ -33,8 +33,9 @@ func _draw() -> void:
 	for station in WorldScript.STATION_PIXELS:
 		var point: Vector2 = bounds.position + (station["at"] / WorldScript.SOURCE_SIZE) * bounds.size
 		var station_task_id := str(station.get("task_id", ""))
+		var is_exact_task_station := str(station.get("name", "")) == str(WorldScript.TASK_STATIONS.get(station_task_id, ""))
 		var is_exact_killer_station := str(station.get("name", "")) == str(WorldScript.SABOTAGE_STATIONS.get(station_task_id, ""))
-		var is_task := task_ids.has(station_task_id) and (not killer_mode or is_exact_killer_station)
+		var is_task := task_ids.has(station_task_id) and (is_exact_killer_station if killer_mode else is_exact_task_station)
 		if task_mode and not is_task:
 			continue
 		if is_task:

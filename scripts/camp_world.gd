@@ -21,6 +21,18 @@ const SABOTAGE_STATIONS := {
 	"supplies": "Supply Shelves",
 	"lanterns": "Lodge Lantern"
 }
+const TASK_STATIONS := {
+	"firewood": "Weak Tree",
+	"generator": "Camp Generator",
+	"dinner": "Dining Counter",
+	"cabins": "Cabin A Bunks",
+	"tools": "Tool Bench",
+	"lanterns": "Lodge Lantern",
+	"dock": "Dock Boards",
+	"lake": "Lake Cleanup Bin",
+	"radio": "Office Radio",
+	"supplies": "Supply Shelves"
+}
 
 const CampBellScript := preload("res://scripts/camp_bell.gd")
 const EMERGENCY_BUTTON_TEXTURE := preload("res://assets/phase5/camp_bell_post.png")
@@ -420,8 +432,9 @@ func find_path(from_world: Vector2, to_world: Vector2) -> PackedVector2Array:
 func _draw() -> void:
 	for station in stations:
 		var at: Vector2 = station["at"]
-		var is_task := active_task_ids.has(str(station.get("task_id", "")))
 		var sabotage_id := str(station.get("task_id", ""))
+		var canonical_task_station := str(TASK_STATIONS.get(sabotage_id, ""))
+		var is_task := active_task_ids.has(sabotage_id) and str(station.get("name", "")) == canonical_task_station
 		var correct_sabotage_station := str(station.get("name", "")) == str(SABOTAGE_STATIONS.get(sabotage_id, ""))
 		var is_sabotaged := active_sabotage_ids.has(sabotage_id) and correct_sabotage_station
 		var is_killer_target := killer_sabotage_ids.has(sabotage_id) and correct_sabotage_station
@@ -531,4 +544,3 @@ func get_spawn_point() -> Vector2:
 
 func is_near_emergency_button(player_pos: Vector2) -> bool:
 	return player_pos.distance_to(EMERGENCY_BUTTON_POS) <= EMERGENCY_BUTTON_RADIUS
-

@@ -3,6 +3,12 @@ extends CharacterBody2D
 const WorldScript = preload("res://scripts/camp_world.gd")
 const CustomizationCatalog = preload("res://scripts/customization_catalog.gd")
 const SPRITE_SHEET := preload("res://assets/character_sprite_keyed.png")
+const COSTUME_SHEETS := {
+	"ranger": preload("res://assets/skins/ranger/sheet.png"),
+	"winter": preload("res://assets/skins/winter/sheet.png"),
+	"detective": preload("res://assets/skins/detective/sheet.png"),
+	"scout": preload("res://assets/skins/scout/sheet.png")
+}
 const SPRITE_SHADER := preload("res://shaders/sprite_background_key.gdshader")
 const GHOST_TEXTURES := [
 	preload("res://assets/phase4/ghosts/ghost_orange.png"),
@@ -15,10 +21,29 @@ const GHOST_TEXTURES := [
 const FRAME_LEFT := [43, 190, 335, 485, 694, 830, 965, 1096, 1228, 1363]
 const ROW_TOP := [30, 225, 402, 569, 726, 871]
 const ROW_HEIGHT := [164, 154, 150, 149, 142, 137]
+const COSTUME_FRAME_LEFT := {
+	"ranger": [40, 188, 335, 486, 688, 829, 966, 1101, 1233, 1373],
+	"winter": [41, 186, 330, 482, 683, 825, 963, 1096, 1229, 1366],
+	"detective": [47, 191, 338, 487, 694, 831, 964, 1097, 1231, 1367],
+	"scout": [42, 188, 333, 483, 692, 828, 963, 1094, 1227, 1363]
+}
+const COSTUME_ROW_TOP := {
+	"ranger": [21, 196, 370, 543, 714, 866],
+	"winter": [15, 198, 380, 560, 732, 884],
+	"detective": [25, 201, 370, 537, 700, 854],
+	"scout": [31, 212, 385, 559, 726, 871]
+}
+const COSTUME_ROW_HEIGHT := {
+	"ranger": [166, 163, 162, 162, 158, 153],
+	"winter": [178, 175, 173, 170, 161, 140],
+	"detective": [165, 160, 158, 155, 150, 150],
+	"scout": [162, 161, 160, 157, 144, 142]
+}
 # Lobby colours are Orange, Blue, Green, Red, Purple, Yellow, while the
 # source sheet rows are Orange, Red, Yellow, Green, Blue, Purple.
 const COLOR_TO_SHEET_ROW := [0, 4, 3, 1, 5, 2]
 const FRAME_WIDTH := 120
+const COSTUME_FRAME_WIDTH := 122
 const TARGET_SPRITE_HEIGHT := 94.0
 
 signal route_point_reached(actor)
@@ -119,28 +144,24 @@ func set_customization(p_look_id: String, p_outfit_id: String = "") -> void:
 	look_id = p_look_id if CustomizationCatalog.LOOKS.has(p_look_id) else "classic"
 	hat_id = look_id
 	outfit_id = p_outfit_id
+	active_frame = -1
 	_update_customization_textures()
 
 
 func _update_customization_textures() -> void:
 	if not is_instance_valid(sprite):
 		return
-	if look_id != "classic" and CustomizationCatalog.LOOKS.has(look_id):
-		var skin_tex := CustomizationCatalog.get_skin_portrait(look_id, sprite_variant)
-		if skin_tex != null:
-			sprite.texture = skin_tex
-			sprite.region_enabled = false
-			sprite.material = null
-			var art_scale := TARGET_SPRITE_HEIGHT / 136.0
-			sprite.scale = Vector2.ONE * art_scale
-			sprite.position = Vector2(0.0, 17.0 - 136.0 * art_scale * 0.5)
-			return
-	# Classic look uses base sprite sheet
-	sprite.texture = SPRITE_SHEET
+	var sheet_tex: Texture2D = SPRITE_SHEET
+	if COSTUME_SHEETS.has(look_id):
+		var costume_sheet := COSTUME_SHEETS.get(look_id) as Texture2D
+		if costume_sheet != null:
+			sheet_tex = costume_sheet
+	sprite.texture = sheet_tex
 	sprite.region_enabled = true
 	var key_material := ShaderMaterial.new()
 	key_material.shader = SPRITE_SHADER
 	sprite.material = key_material
+	active_frame = -1
 	_set_frame(0)
 
 
@@ -206,14 +227,15 @@ func _update_animation(delta: float, direction: Vector2, running: bool) -> void:
 			elif direction.x > 0.15:
 				ghost_sprite.flip_h = false
 		return
-	if look_id != "classic":
-		var bob := sin(animation_time * (14.0 if running else 9.0)) * (2.2 if moving else 0.6)
-		var art_scale := TARGET_SPRITE_HEIGHT / 136.0
-		sprite.position = Vector2(0.0, 17.0 - 136.0 * art_scale * 0.5 + (bob if moving else 0.0))
-		sprite.rotation = sin(animation_time * (14.0 if running else 9.0)) * 0.04 if moving else 0.0
-	else:
-		var frame := int(animation_time * (14.0 if running else 9.0)) % 6 + 4 if moving else int(animation_time * 4.0) % 4
-		_set_frame(frame)
+	var frame := int(animation_time * (14.0 if running else 9.0)) % 6 + 4 if moving else int(animation_time * 4.0) % 4
+	_set_frame(frame)
+	var bob := sin(animation_time * (14.0 if running else 9.0)) * (2.2 if moving else 0.5)
+	var color_index := clampi(sprite_variant, 0, COLOR_TO_SHEET_ROW.size() - 1)
+	var row: int = COLOR_TO_SHEET_ROW[color_index]
+	var height := _row_height_for_look(row)
+	var art_scale := TARGET_SPRITE_HEIGHT / float(height - 12)
+	sprite.position = Vector2(0.0, 17.0 - float(height) * art_scale * 0.5 + bob)
+	sprite.rotation = sin(animation_time * (14.0 if running else 9.0)) * 0.04 if moving else 0.0
 	if direction.x < -0.15:
 		sprite.flip_h = true
 	elif direction.x > 0.15:
@@ -221,18 +243,24 @@ func _update_animation(delta: float, direction: Vector2, running: bool) -> void:
 
 
 func _set_frame(frame: int) -> void:
-	if look_id != "classic":
-		return
 	if frame == active_frame:
 		return
 	active_frame = frame
 	var color_index := clampi(sprite_variant, 0, COLOR_TO_SHEET_ROW.size() - 1)
 	var row: int = COLOR_TO_SHEET_ROW[color_index]
-	var height: int = ROW_HEIGHT[row]
-	sprite.region_rect = Rect2(FRAME_LEFT[frame], ROW_TOP[row], FRAME_WIDTH, height)
+	var frame_lefts: Array = COSTUME_FRAME_LEFT.get(look_id, FRAME_LEFT)
+	var row_tops: Array = COSTUME_ROW_TOP.get(look_id, ROW_TOP)
+	var height := _row_height_for_look(row)
+	var frame_width := COSTUME_FRAME_WIDTH if COSTUME_FRAME_LEFT.has(look_id) else FRAME_WIDTH
+	sprite.region_rect = Rect2(int(frame_lefts[frame]), int(row_tops[row]), frame_width, height)
 	var art_scale := TARGET_SPRITE_HEIGHT / float(height - 12)
 	sprite.scale = Vector2.ONE * art_scale
 	sprite.position = Vector2(0.0, 17.0 - float(height) * art_scale * 0.5)
+
+
+func _row_height_for_look(row: int) -> int:
+	var row_heights: Array = COSTUME_ROW_HEIGHT.get(look_id, ROW_HEIGHT)
+	return int(row_heights[row])
 
 
 func _draw() -> void:
@@ -299,6 +327,16 @@ func play_death_reaction(from_position: Vector2) -> void:
 	if not is_instance_valid(sprite):
 		return
 	is_performing_action = true
+	# The authoritative state already marks the victim as a ghost before this
+	# reaction starts. Temporarily render the living layers for the collapse so
+	# the ghost sprite never flashes over the newly spawned body marker.
+	if is_instance_valid(ghost_sprite):
+		ghost_sprite.visible = false
+	sprite.visible = true
+	if is_instance_valid(hat_sprite):
+		hat_sprite.visible = hat_sprite.texture != null
+	if is_instance_valid(outfit_sprite):
+		outfit_sprite.visible = outfit_sprite.texture != null
 	visible = true
 	var dir := (global_position - from_position).normalized()
 	if dir.length_squared() < 0.01:
@@ -369,4 +407,3 @@ func shake_camera(intensity: float = 6.0, duration: float = 0.22) -> void:
 		tween.tween_property(cam, "offset", offset, step_time)
 		cur_intensity *= 0.72
 	tween.tween_property(cam, "offset", Vector2.ZERO, step_time)
-

@@ -1,13 +1,12 @@
 extends Node2D
 
-# A short, non-graphic five-frame burst which plays at the authoritative body
+# A short, non-graphic four-frame burst which plays at the authoritative body
 # position on every client that receives the new body state.
 const FRAMES := [
 	preload("res://assets/phase4/kill/impact_flat_v3.svg"),
 	preload("res://assets/phase4/kill/blood_streak_v4.png"),
 	preload("res://assets/phase4/kill/blood_burst_v4.png"),
-	preload("res://assets/phase4/kill/blood_droplets_v4.png"),
-	preload("res://assets/phase4/kill/ghost_flat_v2.png")
+	preload("res://assets/phase4/kill/blood_droplets_v4.png")
 ]
 
 var elapsed := 0.0

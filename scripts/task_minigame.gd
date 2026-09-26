@@ -160,6 +160,7 @@ var hammer_nail_hits: Array[int] = []
 var hammer_hits_required := 3
 var finished := false
 var is_sabotage_task := false
+var is_repair_task := false
 var sabotage_step := 0
 var sabotage_visual: TextureRect
 var sabotage_buttons: Array[Button] = []
@@ -174,9 +175,10 @@ func _ready() -> void:
 	call_deferred("_layout")
 
 
-func setup(value: String, sabotage: bool = false) -> void:
+func setup(value: String, sabotage: bool = false, repair: bool = false) -> void:
 	task_id = value
 	is_sabotage_task = sabotage
+	is_repair_task = repair
 	task = TaskCatalog.get_sabotage_task(task_id) if sabotage else TaskCatalog.get_task(task_id)
 
 
@@ -1148,13 +1150,13 @@ func _finish() -> void:
 	finished = true
 	hold_active = false
 	progress.value = 100.0
-	status_label.text = "SABOTAGE COMPLETE" if is_sabotage_task else "TASK COMPLETE"
+	status_label.text = "SABOTAGE COMPLETE" if is_sabotage_task else ("SYSTEM REPAIRED" if is_repair_task else "TASK COMPLETE")
 	if task_id == "dock":
 		var dock_assets: Array = task.get("task_assets", [])
 		if dock_assets.size() >= 3 and is_instance_valid(task_icon):
 			task_icon.texture = load(str(dock_assets[2]))
 	if is_instance_valid(drop_label):
-		drop_label.text = "SABOTAGE COMPLETE" if is_sabotage_task else "TASK COMPLETE"
+		drop_label.text = "SABOTAGE COMPLETE" if is_sabotage_task else ("SYSTEM REPAIRED" if is_repair_task else "TASK COMPLETE")
 	for button in action_buttons:
 		button.disabled = true
 	await get_tree().create_timer(0.45).timeout
