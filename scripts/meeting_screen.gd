@@ -31,6 +31,8 @@ const MEETING_BACKDROP := preload("res://assets/phase5/meeting_backdrop.png")
 const ChatBoxScript = preload("res://scripts/chat_box.gd")
 const CustomizationCatalog = preload("res://scripts/customization_catalog.gd")
 const GREYSCALE_SHADER := preload("res://shaders/greyscale.gdshader")
+const TALLY_REVIEW_DURATION := 6.0
+const OUTCOME_REVIEW_DURATION := 4.5
 
 var meeting_data: Dictionary = {}
 var local_player_id := ""
@@ -55,7 +57,6 @@ var action_row: HBoxContainer
 var skip_btn: Button
 var skip_confirm_box: HBoxContainer
 var skip_result_badge: Label
-var dismiss_button: Button
 
 # Outcome / Ejection Overlay
 var outcome_overlay: Control
@@ -87,8 +88,10 @@ var local_vote_target := ""
 var selected_card_id := ""
 var voted_player_ids: Dictionary = {}
 var in_results_phase := false
+var waiting_for_results := false
+var showing_outcome := false
 var voting_results: Dictionary = {}
-var results_timer := 3.8
+var results_timer := TALLY_REVIEW_DURATION
 var card_entries: Dictionary = {} # player_id -> Dictionary of nodes
 
 
@@ -162,8 +165,16 @@ func _process(delta: float) -> void:
 	
 	if in_results_phase:
 		results_timer -= delta
-		if results_timer <= 0.0 and can_dismiss:
-			_on_dismiss()
+		if is_instance_valid(timer_label):
+			var result_stage := "FINAL OUTCOME" if showing_outcome else "VOTE RESULTS"
+			timer_label.text = "%s: %ds" % [result_stage, maxi(0, int(ceilf(results_timer)))]
+		if results_timer <= 0.0:
+			if not showing_outcome:
+				showing_outcome = true
+				results_timer = OUTCOME_REVIEW_DURATION
+				_show_outcome_overlay(voting_results)
+			elif can_dismiss:
+				_on_dismiss()
 		return
 
 	if in_discussion_phase:
@@ -181,8 +192,17 @@ func _process(delta: float) -> void:
 		if is_instance_valid(timer_label):
 			timer_label.text = "VOTING TIME: %ds" % maxi(0, int(ceilf(time_left)))
 		if time_left <= 0.0:
-			# Auto-conclude locally if no server results arrived
-			_local_tally_and_show()
+			# Network meetings wait for the authoritative tally instead of briefly
+			# showing a local-only result before the server packet arrives.
+			if is_instance_valid(session):
+				waiting_for_results = true
+				time_left = 0.0
+				_deselect_card()
+				_update_voting_controls_state()
+				if is_instance_valid(timer_label):
+					timer_label.text = "FINALIZING VOTES..."
+			else:
+				_local_tally_and_show()
 
 
 func _build_backdrop() -> void:
@@ -460,22 +480,6 @@ func _build_footer() -> void:
 	skip_result_badge.add_theme_color_override("font_color", Color("#ffd166"))
 	action_row.add_child(skip_result_badge)
 	
-	# Dismiss / Return button (for host / local testing)
-	dismiss_button = Button.new()
-	dismiss_button.text = "RETURN TO CAMP"
-	dismiss_button.custom_minimum_size = Vector2(165, 38)
-	dismiss_button.add_theme_font_size_override("font_size", 15)
-	var normal_style := StyleBoxFlat.new()
-	normal_style.bg_color = Color("#8b5e3c")
-	normal_style.border_color = Color("#f4d7a7")
-	normal_style.set_border_width_all(2)
-	normal_style.set_corner_radius_all(8)
-	dismiss_button.add_theme_stylebox_override("normal", normal_style)
-	dismiss_button.add_theme_color_override("font_color", Color("#fffbe7"))
-	dismiss_button.pressed.connect(_on_dismiss)
-	action_row.add_child(dismiss_button)
-
-
 func _build_outcome_overlay() -> void:
 	outcome_overlay = Control.new()
 	outcome_overlay.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
@@ -583,7 +587,7 @@ func _end_reveal() -> void:
 
 
 func _update_voting_controls_state() -> void:
-	var can_vote := not in_discussion_phase and not in_reveal_phase and not in_results_phase and not local_voted and not local_is_ghost
+	var can_vote := not in_discussion_phase and not in_reveal_phase and not in_results_phase and not waiting_for_results and not local_voted and not local_is_ghost
 	if is_instance_valid(skip_btn):
 		skip_btn.disabled = not can_vote
 	for pid: String in card_entries:
@@ -730,7 +734,9 @@ func _create_player_card(pdata: Dictionary, caller_id: String, is_spotlight: boo
 		click_btn.add_theme_stylebox_override("pressed", empty_style)
 		click_btn.pressed.connect(func() -> void: _on_card_clicked(pid))
 		card.add_child(click_btn)
-		card.move_child(click_btn, 0)
+		# Keep this transparent button above decorative TextureRects and labels;
+		# otherwise those controls can consume the click before selection fires.
+		card.move_child(click_btn, card.get_child_count() - 1)
 	
 	# Container wrapping the profile card on top and voting button directly below
 	var item_container := VBoxContainer.new()
@@ -863,7 +869,7 @@ func _create_player_card(pdata: Dictionary, caller_id: String, is_spotlight: boo
 
 
 func _on_card_clicked(pid: String) -> void:
-	if in_discussion_phase or local_voted or local_is_ghost or in_reveal_phase or in_results_phase:
+	if in_discussion_phase or local_voted or local_is_ghost or in_reveal_phase or in_results_phase or waiting_for_results:
 		return
 	if not card_entries.has(pid) or bool(card_entries[pid].get("is_dead", false)):
 		return
@@ -895,7 +901,9 @@ func _deselect_card() -> void:
 
 
 func _confirm_vote(pid: String) -> void:
-	if local_voted or local_is_ghost:
+	if in_discussion_phase or local_voted or local_is_ghost or in_reveal_phase or in_results_phase or waiting_for_results:
+		return
+	if not card_entries.has(pid) or bool(card_entries[pid].get("is_dead", false)):
 		return
 	local_voted = true
 	local_vote_target = pid
@@ -917,14 +925,14 @@ func _confirm_vote(pid: String) -> void:
 
 
 func _on_skip_clicked() -> void:
-	if in_discussion_phase or local_voted or local_is_ghost or in_reveal_phase or in_results_phase:
+	if in_discussion_phase or local_voted or local_is_ghost or in_reveal_phase or in_results_phase or waiting_for_results:
 		return
 	_deselect_card()
 	skip_confirm_box.visible = not skip_confirm_box.visible
 
 
 func _on_skip_confirmed() -> void:
-	if local_voted or local_is_ghost:
+	if in_discussion_phase or local_voted or local_is_ghost or in_reveal_phase or in_results_phase or waiting_for_results:
 		return
 	local_voted = true
 	local_vote_target = "skip"
@@ -965,9 +973,17 @@ func _update_vote_progress_label() -> void:
 
 func show_voting_results(results: Dictionary) -> void:
 	in_results_phase = true
+	waiting_for_results = false
+	showing_outcome = false
 	voting_results = results
 	time_left = 0.0
 	_deselect_card()
+	if is_instance_valid(outcome_overlay):
+		outcome_overlay.visible = false
+	if is_instance_valid(timer_label):
+		timer_label.text = "VOTE RESULTS: %ds" % int(TALLY_REVIEW_DURATION)
+	if is_instance_valid(vote_progress_label):
+		vote_progress_label.text = "FINAL TALLY"
 	
 	if is_instance_valid(skip_confirm_box):
 		skip_confirm_box.visible = false
@@ -1014,9 +1030,8 @@ func show_voting_results(results: Dictionary) -> void:
 		skip_result_badge.text = "SKIPPED: %d %s" % [skip_count, "VOTE" if skip_count == 1 else "VOTES"]
 		skip_result_badge.visible = true
 	
-	# Show dramatic outcome overlay
-	_show_outcome_overlay(results)
-	results_timer = 3.8
+	# Keep the full tally unobstructed before the dramatic outcome overlay.
+	results_timer = TALLY_REVIEW_DURATION
 
 
 func _show_outcome_overlay(results: Dictionary) -> void:
@@ -1183,5 +1198,3 @@ func _layout() -> void:
 		var ld_h := minf(vp_size.y * 0.45, 230.0 * scale_factor)
 		leave_dialog.size = Vector2(ld_w, ld_h)
 		leave_dialog.position = Vector2((vp_size.x - ld_w) * 0.5, (vp_size.y - ld_h) * 0.5)
-
-

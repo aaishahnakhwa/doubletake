@@ -81,7 +81,7 @@ const STATION_PIXELS := [
 # These are deliberately non-graphic cartoon set pieces. The host selects the
 # context from both players' authoritative positions, never from a client hint.
 const ELIMINATION_CONTEXTS := [
-	{"id": "campfire", "name": "Campfire", "at": Vector2(758, 503), "radius": 185.0},
+	{"id": "campfire", "name": "Campfire", "at": Vector2(758, 503), "radius": 600.0},
 	{"id": "weak_tree", "name": "Weak Tree", "at": Vector2(1147, 635), "radius": 180.0},
 	# Multiple shoreline anchors share one Lake cinematic. This makes the
 	# contextual kill available around the playable dock instead of at one
@@ -534,7 +534,36 @@ func get_nearest_station(at: Vector2, radius: float = 95.0) -> Dictionary:
 	return nearest
 
 
-func get_contextual_elimination(_killer_at: Vector2, _victim_at: Vector2, _radius: float = 145.0) -> Dictionary:
+func get_contextual_elimination(killer_at: Vector2, victim_at: Vector2, _radius: float = 145.0) -> Dictionary:
+	var encounter_at := (killer_at + victim_at) * 0.5
+	# Specific set pieces win inside their authored zones. This prevents the
+	# intentionally wide campfire zone from swallowing lake/tree/workshop kills.
+	var selected: Dictionary = {}
+	var selected_ratio := INF
+	for context: Dictionary in ELIMINATION_CONTEXTS:
+		if str(context.get("id", "")) == "campfire":
+			continue
+		var context_at: Vector2 = (context["at"] as Vector2) * ART_SCALE
+		var context_radius := float(context["radius"]) * ART_SCALE
+		var distance := encounter_at.distance_to(context_at)
+		if distance <= context_radius:
+			var ratio := distance / maxf(context_radius, 1.0)
+			if ratio < selected_ratio:
+				selected = context.duplicate(true)
+				selected["at"] = context_at
+				selected_ratio = ratio
+	if not selected.is_empty():
+		return selected
+
+	# Campfire remains a wide contextual zone everywhere else in camp. Checking
+	# the midpoint keeps the result stable when players stand on opposite sides.
+	var campfire: Dictionary = ELIMINATION_CONTEXTS[0]
+	var fire_at: Vector2 = (campfire["at"] as Vector2) * ART_SCALE
+	if encounter_at.distance_to(fire_at) <= float(campfire["radius"]) * ART_SCALE:
+		var result := campfire.duplicate(true)
+		result["at"] = fire_at
+		result["push_direction"] = -1.0 if fire_at.x < victim_at.x else 1.0
+		return result
 	return {"id": "normal", "name": "Close-range"}
 
 

@@ -4,11 +4,19 @@ signal finished
 
 const KILLER_ATTACK_ATLAS := preload("res://assets/phase4/kill/killer_attack_atlas_v2.png")
 const VICTIM_DEFEAT_ATLAS := preload("res://assets/phase4/kill/victim_defeat_atlas_mirrored_v2.png")
+const CAMPFIRE_SHEET := preload("res://assets/phase4/kill/contexts/campfire_sprite_sheet.png")
 const ACTION_FRAME_COUNT := 5
 const KILLER_FRAME_X := [175.0, 420.0, 665.0, 925.0, 1165.0]
 const KILLER_FRAME_WIDTH := [220.0, 220.0, 220.0, 220.0, 220.0]
 const VICTIM_FRAME_X := [294.0, 490.0, 670.0, 855.0, 1050.0]
 const VICTIM_FRAME_WIDTH := [186.0, 180.0, 185.0, 190.0, 220.0]
+const CAMPFIRE_FRAME_RECTS := [
+	Rect2(85.0, 238.0, 200.0, 270.0),
+	Rect2(350.0, 205.0, 190.0, 290.0),
+	Rect2(614.0, 190.0, 188.0, 305.0),
+	Rect2(840.0, 305.0, 215.0, 185.0),
+	Rect2(1110.0, 300.0, 210.0, 190.0)
+]
 const CHARACTER_SHEET := preload("res://assets/character_sprite_keyed.png")
 const CHARACTER_SHADER := preload("res://shaders/sprite_background_key.gdshader")
 const FLAT_FX_FRAMES := [
@@ -36,6 +44,12 @@ const CONTEXT_TEXTURES := {
 	"weak_tree": preload("res://assets/phase4/kill/contexts/falling_tree_flat_v2.png"),
 	"workshop": preload("res://assets/phase4/kill/contexts/workshop_cart_flat_v3.svg")
 }
+const CONTEXT_BACKGROUNDS := {
+	"campfire": preload("res://assets/phase4/kill/backgrounds/context_campfire_bg_v1.png"),
+	"lake": preload("res://assets/phase4/kill/backgrounds/context_lake_bg_v1.png"),
+	"weak_tree": preload("res://assets/phase4/kill/backgrounds/context_weak_tree_bg_v1.png"),
+	"workshop": preload("res://assets/phase4/kill/backgrounds/context_workshop_bg_v1.png")
+}
 const CHARACTER_FRAME_LEFT := [43, 190, 335, 485, 694, 830, 965, 1096, 1228, 1363]
 const CHARACTER_ROW_TOP := [30, 225, 402, 569, 726, 871]
 const CHARACTER_ROW_HEIGHT := [164, 154, 150, 149, 142, 137]
@@ -47,6 +61,8 @@ var body_state: Dictionary = {}
 var root: Control
 var screen_tint: ColorRect
 var band: Panel
+var context_background: TextureRect
+var background_shade: ColorRect
 var attacker: TextureRect
 var victim: TextureRect
 var context_prop: TextureRect
@@ -59,6 +75,8 @@ var victim_target := Vector2.ZERO
 var killer_color := 0
 var victim_color := 0
 var context_id := "normal"
+var push_direction := 1.0
+var campfire_idle_tween: Tween
 var has_finished := false
 
 
@@ -70,7 +88,9 @@ func _ready() -> void:
 	layer = 90
 	killer_color = clampi(int(body_state.get("killer_color", 0)), 0, 5)
 	victim_color = clampi(int(body_state.get("color", 0)), 0, 5)
-	context_id = "normal"
+	var context: Dictionary = body_state.get("context", {})
+	context_id = str(context.get("id", "normal"))
+	push_direction = -1.0 if float(context.get("push_direction", 1.0)) < 0.0 else 1.0
 
 	root = Control.new()
 	root.mouse_filter = Control.MOUSE_FILTER_STOP
@@ -97,6 +117,24 @@ func _ready() -> void:
 	band.add_theme_stylebox_override("panel", band_style)
 	band.clip_contents = true
 	root.add_child(band)
+
+	# Context art lives only inside the cinematic strip. Keeping it as the
+	# first child guarantees that every character, prop and impact stays above
+	# it, while the live map remains visible above and below the strip.
+	context_background = TextureRect.new()
+	context_background.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	context_background.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_COVERED
+	context_background.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	context_background.texture = CONTEXT_BACKGROUNDS.get(context_id)
+	context_background.visible = context_id in CONTEXT_BACKGROUNDS
+	context_background.modulate = Color(0.90, 0.92, 0.96, 0.94)
+	band.add_child(context_background)
+
+	background_shade = ColorRect.new()
+	background_shade.color = Color(0.015, 0.025, 0.045, 0.16)
+	background_shade.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	background_shade.visible = context_background.visible
+	band.add_child(background_shade)
 
 	attacker = _action_view(KILLER_ATTACK_ATLAS, killer_color, 0)
 	victim = _action_view(VICTIM_DEFEAT_ATLAS, victim_color, 0)
@@ -175,7 +213,55 @@ func _set_action_frame(view: TextureRect, atlas: Texture2D, color_index: int, fr
 		frame_width = VICTIM_FRAME_WIDTH[safe_frame]
 	frame.region = Rect2(frame_x, row_height * row + 4.0, frame_width, row_height - 8.0)
 	frame.filter_clip = true
+	view.material = null
 	view.texture = frame
+
+
+func _set_campfire_frame(frame_index: int) -> void:
+	var frame := AtlasTexture.new()
+	frame.atlas = CAMPFIRE_SHEET
+	frame.region = CAMPFIRE_FRAME_RECTS[clampi(frame_index, 0, CAMPFIRE_FRAME_RECTS.size() - 1)]
+	frame.filter_clip = true
+	context_prop.texture = frame
+	if context_prop.material == null:
+		var key_shader := Shader.new()
+		key_shader.code = """
+shader_type canvas_item;
+void fragment() {
+	vec4 ink = texture(TEXTURE, UV);
+	float least = min(ink.r, min(ink.g, ink.b));
+	float most = max(ink.r, max(ink.g, ink.b));
+	float neutral = 1.0 - smoothstep(0.025, 0.09, most - least);
+	float paper = smoothstep(0.82, 0.97, least) * neutral;
+	float guide_line = smoothstep(0.42, 0.62, least) * neutral;
+	// The ember frame has a baked pale orange/white glow. Its least channel
+	// remains bright, unlike the saturated flame, stones and red coals.
+	float baked_glow = smoothstep(0.70, 0.90, least);
+	float background = max(baked_glow, max(paper, guide_line));
+	COLOR = vec4(ink.rgb, ink.a * (1.0 - background));
+}
+"""
+		var key_material := ShaderMaterial.new()
+		key_material.shader = key_shader
+		context_prop.material = key_material
+	if frame_index == 3:
+		context_prop.scale = Vector2(0.78, 0.78)
+	elif frame_index == 4:
+		context_prop.scale = Vector2(0.72, 0.72)
+
+
+func _start_campfire_idle() -> void:
+	if campfire_idle_tween != null and campfire_idle_tween.is_valid():
+		campfire_idle_tween.kill()
+	campfire_idle_tween = create_tween().set_loops()
+	campfire_idle_tween.tween_callback(_set_campfire_frame.bind(0))
+	campfire_idle_tween.tween_interval(0.14)
+	campfire_idle_tween.tween_callback(_set_campfire_frame.bind(1))
+	campfire_idle_tween.tween_interval(0.16)
+	campfire_idle_tween.tween_callback(_set_campfire_frame.bind(0))
+	campfire_idle_tween.tween_interval(0.12)
+	campfire_idle_tween.tween_callback(_set_campfire_frame.bind(1))
+	campfire_idle_tween.tween_interval(0.18)
 
 
 func _fx_frame(frame_index: int) -> Texture2D:
@@ -237,6 +323,10 @@ func _layout() -> void:
 	band.size = band_size
 	band.position = (viewport_size - band_size) * 0.5
 	band.pivot_offset = band_size * 0.5
+	context_background.position = Vector2.ZERO
+	context_background.size = band_size
+	background_shade.position = Vector2.ZERO
+	background_shade.size = band_size
 	flash.position = Vector2.ZERO
 	flash.size = band_size
 
@@ -247,7 +337,7 @@ func _layout() -> void:
 	attacker_target = Vector2(band_width * 0.18, band_height - character_size.y - 42.0 * ui_scale)
 	# Both characters begin within visible reach; contextual motion then carries
 	# the victim into the nearby set piece.
-	victim_target = Vector2(band_width * 0.45, band_height - character_size.y - 42.0 * ui_scale)
+	victim_target = Vector2(band_width * 0.38, band_height - character_size.y - 42.0 * ui_scale)
 	attacker.position = attacker_target
 	victim.position = victim_target
 	attacker.pivot_offset = attacker.size * 0.5
@@ -261,12 +351,24 @@ func _layout() -> void:
 	if context_id == "lake":
 		prop_size = Vector2(480.0, 310.0) * ui_scale
 	elif context_id == "weak_tree":
-		prop_size = Vector2(490.0, 340.0) * ui_scale
+		prop_size = Vector2(430.0, 310.0) * ui_scale
 	elif context_id == "workshop":
 		prop_size = Vector2(470.0, 325.0) * ui_scale
 	context_prop.size = prop_size
 	context_prop.position = Vector2(band_width * 0.70, band_height * 0.61) - prop_size * 0.5
 	context_prop.pivot_offset = prop_size * 0.5
+	if context_id == "lake":
+		context_prop.position = Vector2(band_width * 0.72, band_height * 0.61) - prop_size * 0.5
+	elif context_id == "weak_tree":
+		context_prop.position = Vector2(band_width * 0.82, band_height * 0.59) - prop_size * 0.5
+	if context_id == "campfire" and push_direction < 0.0:
+		attacker_target.x = band_width * 0.56
+		victim_target.x = band_width * 0.34
+		context_prop.position = Vector2(band_width * 0.18, band_height * 0.61) - prop_size * 0.5
+	attacker.position = attacker_target
+	victim.position = victim_target
+	attacker.scale = Vector2(push_direction, 1.0)
+	victim.scale = Vector2(push_direction, 1.0)
 	title.position = Vector2(0.0, 10.0 * ui_scale)
 	title.size = Vector2(band_width, 56.0 * ui_scale)
 	title.add_theme_font_size_override("font_size", int(38.0 * ui_scale))
@@ -293,9 +395,6 @@ func _play() -> void:
 
 
 func _play_contextual() -> void:
-	# Context kills are physical pushes/accidents. Use the normal playable
-	# character art for the Killer so no weapon appears in these sequences.
-	_set_playing_frame(attacker, killer_color, 4)
 	match context_id:
 		"campfire": await _play_campfire()
 		"lake": await _play_lake()
@@ -304,24 +403,71 @@ func _play_contextual() -> void:
 
 
 func _play_campfire() -> void:
+	# The flat push atlases are deliberately not used here. These authored
+	# full-character atlases match the visible camper art and retain colour.
+	_set_action_frame(attacker, KILLER_ATTACK_ATLAS, killer_color, 0)
+	_set_action_frame(victim, VICTIM_DEFEAT_ATLAS, victim_color, 0)
+	_set_campfire_frame(0)
+	_start_campfire_idle()
+	attacker.scale = Vector2(push_direction, 1.0)
+	victim.scale = Vector2(push_direction, 1.0)
 	context_prop.scale = Vector2(0.72, 0.72)
 	var reveal := create_tween().set_parallel(true).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
 	reveal.tween_property(context_prop, "modulate:a", 1.0, 0.24)
 	reveal.tween_property(context_prop, "scale", Vector2.ONE, 0.32)
 	await reveal.finished
-	_set_playing_frame(attacker, killer_color, 5)
+
+	_set_action_frame(attacker, KILLER_ATTACK_ATLAS, killer_color, 1)
 	_set_action_frame(victim, VICTIM_DEFEAT_ATLAS, victim_color, 1)
+	var contact_x := victim_target.x - attacker.size.x * 0.58 * push_direction
+	var approach := create_tween().set_parallel(true).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
+	approach.tween_property(attacker, "position:x", contact_x, 0.30)
+	approach.tween_property(victim, "position:x", victim_target.x + 24.0 * push_direction, 0.30)
+	await approach.finished
+
+	_set_action_frame(attacker, KILLER_ATTACK_ATLAS, killer_color, 2)
+	_set_action_frame(victim, VICTIM_DEFEAT_ATLAS, victim_color, 2)
+	var body_contact := create_tween().set_parallel(true).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+	body_contact.tween_property(attacker, "position:x", contact_x + 22.0 * push_direction, 0.16)
+	body_contact.tween_property(victim, "position:x", victim.position.x + 34.0 * push_direction, 0.16)
+	body_contact.tween_property(victim, "rotation", 0.10 * push_direction, 0.16)
+	await body_contact.finished
+
+	_set_action_frame(attacker, KILLER_ATTACK_ATLAS, killer_color, 3)
+	_set_action_frame(victim, VICTIM_DEFEAT_ATLAS, victim_color, 2)
+	var fire_entry := Vector2(
+		context_prop.position.x + context_prop.size.x * (0.30 if push_direction > 0.0 else 0.50),
+		context_prop.position.y + context_prop.size.y * 0.26
+	)
+	# One readable, direct shove: the victim travels straight into the fire.
+	# There is deliberately no airborne arc or intermediate drop pose.
 	var shove := create_tween().set_parallel(true).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
-	shove.tween_property(attacker, "position:x", victim_target.x - attacker.size.x * 0.58, 0.36)
-	shove.tween_property(victim, "position", context_prop.position + context_prop.size * Vector2(0.33, 0.30), 0.48)
-	shove.tween_property(victim, "rotation", 0.35, 0.48)
+	shove.tween_property(attacker, "position:x", contact_x + 58.0 * push_direction, 0.42)
+	shove.tween_property(victim, "position", fire_entry, 0.42)
+	shove.tween_property(victim, "rotation", 0.26 * push_direction, 0.42)
 	await shove.finished
-	await _play_context_impact(Color(1.0, 0.34, 0.03, 0.46))
-	var sink := create_tween().set_parallel(true)
-	sink.tween_property(victim, "scale", Vector2(0.55, 0.55), 0.36)
-	sink.tween_property(victim, "modulate:a", 0.0, 0.36)
-	sink.tween_property(context_prop, "scale", Vector2(1.08, 1.08), 0.24)
-	await sink.finished
+	if campfire_idle_tween != null and campfire_idle_tween.is_valid():
+		campfire_idle_tween.kill()
+	_set_campfire_frame(2)
+	context_prop.scale = Vector2(1.13, 1.13)
+	effect.position = context_prop.position + context_prop.size * 0.5 - effect.size * 0.5
+	# Once fully inside the flames, remove the victim sprite immediately so no body
+	# remains floating beside or underneath the campfire.
+	victim.visible = false
+	await _play_context_impact(Color(1.0, 0.34, 0.03, 0.50))
+
+	_set_action_frame(attacker, KILLER_ATTACK_ATLAS, killer_color, 4)
+	_set_action_frame(victim, VICTIM_DEFEAT_ATLAS, victim_color, 4)
+	await get_tree().create_timer(0.10).timeout
+	_set_campfire_frame(1)
+	var flare_settle := create_tween().set_parallel(true).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+	flare_settle.tween_property(context_prop, "scale", Vector2.ONE, 0.18)
+	await flare_settle.finished
+	# The authored ember frame contains a baked oval background, so use the
+	# clean low-fire frame for the settle beat before switching to smoke/coals.
+	_set_campfire_frame(0)
+	await get_tree().create_timer(0.20).timeout
+	_set_campfire_frame(4)
 	await _context_hold()
 
 
@@ -329,17 +475,19 @@ func _play_lake() -> void:
 	context_prop.scale = Vector2(0.35, 0.18)
 	_set_playing_frame(attacker, killer_color, 5)
 	_set_action_frame(victim, VICTIM_DEFEAT_ATLAS, victim_color, 1)
+	var water_entry := context_prop.position + context_prop.size * 0.5 - victim.size * 0.5
+	water_entry.y += victim.size.y * 0.10
 	var push := create_tween().set_parallel(true).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
 	push.tween_property(attacker, "position:x", victim_target.x - attacker.size.x * 0.60, 0.34)
-	push.tween_property(victim, "position", context_prop.position + context_prop.size * Vector2(0.26, 0.15), 0.52)
+	push.tween_property(victim, "position", water_entry, 0.52)
 	push.tween_property(victim, "rotation", -0.45, 0.52)
 	await push.finished
+	effect.position = context_prop.position + context_prop.size * 0.5 - effect.size * 0.5
 	await _play_context_impact(Color(0.05, 0.55, 1.0, 0.36))
 	context_prop.modulate.a = 1.0
+	victim.visible = false
 	var splash := create_tween().set_parallel(true).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
 	splash.tween_property(context_prop, "scale", Vector2.ONE, 0.30)
-	splash.tween_property(victim, "position:y", victim.position.y + victim.size.y * 0.46, 0.38)
-	splash.tween_property(victim, "modulate:a", 0.0, 0.36)
 	await splash.finished
 	await _context_hold()
 
@@ -357,12 +505,13 @@ func _play_tree() -> void:
 	await bump.finished
 	var timber := create_tween().set_parallel(true).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_IN)
 	timber.tween_property(context_prop, "position:y", context_prop.position.y + context_prop.size.y * 0.38, 0.46)
+	timber.tween_property(context_prop, "position:x", context_prop.position.x - context_prop.size.x * 0.28, 0.46)
 	timber.tween_property(context_prop, "rotation", 0.05, 0.46)
 	timber.tween_property(victim, "position:y", victim.position.y + victim.size.y * 0.20, 0.46)
 	await timber.finished
+	effect.position = victim.position + victim.size * 0.5 - effect.size * 0.5
 	await _play_context_impact(Color(0.62, 0.44, 0.18, 0.38))
-	_set_action_frame(victim, VICTIM_DEFEAT_ATLAS, victim_color, 4)
-	victim.modulate.a = 0.18
+	victim.visible = false
 	await _context_hold()
 
 
@@ -377,13 +526,16 @@ func _play_workshop() -> void:
 	cart.tween_property(context_prop, "rotation", -0.05, 0.50)
 	cart.tween_property(victim, "position:x", victim.position.x - victim.size.x * 0.08, 0.44)
 	await cart.finished
+	effect.position = victim.position + victim.size * 0.5 - effect.size * 0.5
 	await _play_context_impact(Color(1.0, 0.75, 0.20, 0.38))
 	_set_action_frame(victim, VICTIM_DEFEAT_ATLAS, victim_color, 4)
 	var knock := create_tween().set_parallel(true).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
+	knock.tween_property(victim, "position:x", victim.position.x - victim.size.x * 0.18, 0.34)
 	knock.tween_property(victim, "position:y", victim.position.y + victim.size.y * 0.22, 0.34)
 	knock.tween_property(victim, "rotation", -0.42, 0.34)
-	knock.tween_property(victim, "modulate:a", 0.12, 0.38)
+	knock.tween_property(victim, "modulate:a", 0.0, 0.30)
 	await knock.finished
+	victim.visible = false
 	await _context_hold()
 
 
@@ -404,7 +556,10 @@ func _play_context_impact(flash_color: Color) -> void:
 
 
 func _context_hold() -> void:
-	_set_playing_frame(attacker, killer_color, 0)
+	if context_id == "campfire":
+		_set_action_frame(attacker, KILLER_ATTACK_ATLAS, killer_color, 4)
+	else:
+		_set_playing_frame(attacker, killer_color, 0)
 	victim_label.modulate.a = 1.0
 	await get_tree().create_timer(0.78).timeout
 
