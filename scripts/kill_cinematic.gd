@@ -2,6 +2,7 @@ extends CanvasLayer
 
 signal finished
 
+const AudioManagerScript = preload("res://scripts/audio_manager.gd")
 const KILLER_ATTACK_ATLAS := preload("res://assets/phase4/kill/killer_attack_atlas_v2.png")
 const VICTIM_DEFEAT_ATLAS := preload("res://assets/phase4/kill/victim_defeat_atlas_mirrored_v2.png")
 const CAMPFIRE_SHEET := preload("res://assets/phase4/kill/contexts/campfire_sprite_sheet.png")
@@ -86,6 +87,7 @@ func setup(body: Dictionary) -> void:
 
 func _ready() -> void:
 	layer = 90
+	_ensure_audio_manager()
 	killer_color = clampi(int(body_state.get("killer_color", 0)), 0, 5)
 	victim_color = clampi(int(body_state.get("color", 0)), 0, 5)
 	var context: Dictionary = body_state.get("context", {})
@@ -387,6 +389,7 @@ func _play() -> void:
 	entrance.tween_property(attacker, "position", attacker_target, 0.40)
 	entrance.tween_property(victim, "position", victim_target, 0.40)
 	await entrance.finished
+	_play_sfx(&"kill_sting", -3.0)
 	if context_id in CONTEXT_TEXTURES:
 		await _play_contextual()
 	else:
@@ -442,6 +445,7 @@ func _play_campfire() -> void:
 	# One readable, direct shove: the victim travels straight into the fire.
 	# There is deliberately no airborne arc or intermediate drop pose.
 	var shove := create_tween().set_parallel(true).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
+	_play_sfx(&"shove", -1.5)
 	shove.tween_property(attacker, "position:x", contact_x + 58.0 * push_direction, 0.42)
 	shove.tween_property(victim, "position", fire_entry, 0.42)
 	shove.tween_property(victim, "rotation", 0.26 * push_direction, 0.42)
@@ -454,6 +458,7 @@ func _play_campfire() -> void:
 	# Once fully inside the flames, remove the victim sprite immediately so no body
 	# remains floating beside or underneath the campfire.
 	victim.visible = false
+	_play_sfx(&"fire", -1.0)
 	await _play_context_impact(Color(1.0, 0.34, 0.03, 0.50))
 
 	_set_action_frame(attacker, KILLER_ATTACK_ATLAS, killer_color, 4)
@@ -478,11 +483,13 @@ func _play_lake() -> void:
 	var water_entry := context_prop.position + context_prop.size * 0.5 - victim.size * 0.5
 	water_entry.y += victim.size.y * 0.10
 	var push := create_tween().set_parallel(true).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
+	_play_sfx(&"shove", -2.0)
 	push.tween_property(attacker, "position:x", victim_target.x - attacker.size.x * 0.60, 0.34)
 	push.tween_property(victim, "position", water_entry, 0.52)
 	push.tween_property(victim, "rotation", -0.45, 0.52)
 	await push.finished
 	effect.position = context_prop.position + context_prop.size * 0.5 - effect.size * 0.5
+	_play_sfx(&"splash", -1.0)
 	await _play_context_impact(Color(0.05, 0.55, 1.0, 0.36))
 	context_prop.modulate.a = 1.0
 	victim.visible = false
@@ -500,10 +507,12 @@ func _play_tree() -> void:
 	_set_playing_frame(attacker, killer_color, 5)
 	_set_action_frame(victim, VICTIM_DEFEAT_ATLAS, victim_color, 1)
 	var bump := create_tween().set_parallel(true).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
+	_play_sfx(&"shove", -2.0)
 	bump.tween_property(attacker, "position:x", victim_target.x - attacker.size.x * 0.62, 0.34)
 	bump.tween_property(victim, "position:x", victim.position.x + victim.size.x * 0.28, 0.38)
 	await bump.finished
 	var timber := create_tween().set_parallel(true).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_IN)
+	_play_sfx(&"tree_crack", -1.0)
 	timber.tween_property(context_prop, "position:y", context_prop.position.y + context_prop.size.y * 0.38, 0.46)
 	timber.tween_property(context_prop, "position:x", context_prop.position.x - context_prop.size.x * 0.28, 0.46)
 	timber.tween_property(context_prop, "rotation", 0.05, 0.46)
@@ -522,6 +531,7 @@ func _play_workshop() -> void:
 	_set_playing_frame(attacker, killer_color, 5)
 	_set_action_frame(victim, VICTIM_DEFEAT_ATLAS, victim_color, 0)
 	var cart := create_tween().set_parallel(true).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
+	_play_sfx(&"cart_roll", -1.5)
 	cart.tween_property(context_prop, "position:x", context_prop.position.x - context_prop.size.x * 0.58, 0.50)
 	cart.tween_property(context_prop, "rotation", -0.05, 0.50)
 	cart.tween_property(victim, "position:x", victim.position.x - victim.size.x * 0.08, 0.44)
@@ -540,6 +550,7 @@ func _play_workshop() -> void:
 
 
 func _play_context_impact(flash_color: Color) -> void:
+	_play_sfx(&"impact", -2.5)
 	effect.texture = _fx_frame(0)
 	effect.modulate = Color.WHITE
 	effect.modulate.a = 1.0
@@ -577,6 +588,7 @@ func _play_close_range() -> void:
 	_set_action_frame(attacker, KILLER_ATTACK_ATLAS, killer_color, 1)
 	_set_action_frame(victim, VICTIM_DEFEAT_ATLAS, victim_color, 1)
 	var trail := create_tween().set_parallel(true).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
+	_play_sfx(&"shove", -2.0, 1.15)
 	trail.tween_property(attacker, "position:x", attacker_target.x + attacker.size.x * 0.86, 0.34)
 	trail.tween_property(victim, "position:x", victim_target.x + victim.size.x * 0.05, 0.34)
 	await trail.finished
@@ -589,6 +601,7 @@ func _play_close_range() -> void:
 	effect.scale = Vector2(0.45, 0.45)
 	effect.modulate.a = 1.0
 	flash.color.a = 0.48
+	_play_sfx(&"impact", -1.0)
 	var contact := create_tween().set_parallel(true).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
 	contact.tween_property(effect, "scale", Vector2.ONE, 0.18)
 	contact.tween_property(flash, "color:a", 0.0, 0.24)
@@ -649,3 +662,20 @@ func _finish_cinematic() -> void:
 	has_finished = true
 	finished.emit()
 	queue_free()
+
+
+func _play_sfx(effect_name: StringName, volume_db: float = 0.0, pitch_scale: float = 1.0) -> void:
+	var audio_manager := _ensure_audio_manager()
+	if audio_manager != null:
+		audio_manager.call("play_sfx", effect_name, volume_db, pitch_scale)
+
+
+func _ensure_audio_manager() -> Node:
+	if get_tree() == null:
+		return null
+	var audio_manager := get_tree().root.get_node_or_null("AudioManager")
+	if audio_manager == null:
+		audio_manager = AudioManagerScript.new()
+		audio_manager.name = "AudioManager"
+		get_tree().root.add_child(audio_manager)
+	return audio_manager

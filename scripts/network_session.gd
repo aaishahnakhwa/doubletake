@@ -56,6 +56,18 @@ const EOS_JOIN_RETRY_SECONDS := 1.0
 const EOS_JOIN_MAX_ATTEMPTS := 8
 const EOS_MEMBERSHIP_GRACE_SECONDS := 0.5
 const TEST_BOT_PREFIX := "test-bot-"
+const STATE_CHUNK_BYTES := 700
+const STATE_TRANSFER_MAX_BYTES := 2 * 1024 * 1024
+const STATE_TRANSFER_MAX_CHUNKS := 4096
+const STATE_KIND_JOIN_SUCCESS := 1
+const STATE_KIND_LOBBY := 2
+const STATE_KIND_MATCH_START := 3
+const STATE_KIND_TASK := 4
+const STATE_KIND_PHASE4 := 5
+const STATE_KIND_MEETING := 6
+const STATE_KIND_VOTING_RESULTS := 7
+const STATE_KIND_CHAT := 8
+const STATE_KIND_MATCH_END := 9
 
 var is_server := false
 var room_code := ""
@@ -117,6 +129,8 @@ var test_bot_paths: Dictionary = {}
 var test_bot_path_indices: Dictionary = {}
 var test_bot_wander_steps: Dictionary = {}
 var test_bot_retarget_at: Dictionary = {}
+var next_state_transfer_id := 1
+var incoming_state_transfers: Dictionary = {}
 
 
 func _ready() -> void:
@@ -319,6 +333,8 @@ func _reset_session_state() -> void:
 	eos_connect_attempts = 0
 	eos_connect_retrying = false
 	pending_eos_joins.clear()
+	incoming_state_transfers.clear()
+	next_state_transfer_id = 1
 	if multiplayer != null:
 		if multiplayer.multiplayer_peer != null:
 			multiplayer.multiplayer_peer.close()
@@ -710,10 +726,10 @@ func _accept_join_request(peer_id: int, claims: Dictionary, display_name: String
 	_assign_host_if_needed()
 	var state := _make_lobby_state()
 	var join_packet := _encode_state_packet(state)
-	receive_join_success.rpc_id(peer_id, player_id, int(join_packet[0]), join_packet[1])
+	_send_state_packet(peer_id, STATE_KIND_JOIN_SUCCESS, PackedStringArray([player_id]), join_packet)
 	if match_running:
 		var reconnect_packet := _encode_state_packet(_match_state_for(player_id))
-		receive_match_started.rpc_id(peer_id, str(players[player_id]["role"]), int(reconnect_packet[0]), reconnect_packet[1])
+		_send_state_packet(peer_id, STATE_KIND_MATCH_START, PackedStringArray([str(players[player_id]["role"])]), reconnect_packet)
 		return
 	_broadcast_lobby_state()
 
@@ -1329,7 +1345,7 @@ func _start_match() -> void:
 		if _is_local_server_player(player_id):
 			receive_match_started(str(player["role"]), int(match_packet[0]), match_packet[1])
 		elif _is_peer_connected(peer_id):
-			receive_match_started.rpc_id(peer_id, str(player["role"]), int(match_packet[0]), match_packet[1])
+			_send_state_packet(peer_id, STATE_KIND_MATCH_START, PackedStringArray([str(player["role"])]), match_packet)
 	_broadcast_phase4_state()
 
 
@@ -1441,7 +1457,7 @@ func _broadcast_phase4_state() -> void:
 			phase4_state_received.emit(state)
 		elif _is_peer_connected(peer_id):
 			var phase4_packet := _encode_state_packet(state)
-			receive_phase4_state.rpc_id(peer_id, int(phase4_packet[0]), phase4_packet[1])
+			_send_state_packet(peer_id, STATE_KIND_PHASE4, PackedStringArray(), phase4_packet)
 
 
 func _phase4_actor_error(player_id: String) -> String:
@@ -1671,7 +1687,7 @@ func _broadcast_meeting_start(meeting: Dictionary) -> void:
 		if _is_local_server_player(pid):
 			meeting_started.emit(meeting)
 		elif _is_peer_connected(peer_id):
-			receive_meeting_started.rpc_id(peer_id, int(packet[0]), packet[1])
+			_send_state_packet(peer_id, STATE_KIND_MEETING, PackedStringArray(), packet)
 	var total_time := float(meeting.get("discussion_time", 15.0)) + float(meeting.get("voting_time", 45.0))
 	get_tree().create_timer(total_time + 1.2).timeout.connect(func() -> void:
 		if meeting_active and match_running:
@@ -1772,7 +1788,7 @@ func _tally_votes_and_conclude() -> void:
 		if _is_local_server_player(pid):
 			voting_results_received.emit(results)
 		elif _is_peer_connected(peer_id):
-			receive_voting_results.rpc_id(peer_id, int(packet[0]), packet[1])
+			_send_state_packet(peer_id, STATE_KIND_VOTING_RESULTS, PackedStringArray(), packet)
 
 
 func _end_meeting() -> void:
@@ -1844,7 +1860,7 @@ func _broadcast_chat_message(msg: Dictionary, is_ghost_sender: bool) -> void:
 		if _is_local_server_player(pid):
 			chat_message_received.emit(msg)
 		elif _is_peer_connected(peer_id):
-			receive_chat_message.rpc_id(peer_id, int(packet[0]), packet[1])
+			_send_state_packet(peer_id, STATE_KIND_CHAT, PackedStringArray(), packet)
 
 
 func _send_chat_failure(player_id: String, message: String) -> void:
@@ -1935,7 +1951,7 @@ func _broadcast_task_state() -> void:
 			task_state_received.emit(state)
 		elif _is_peer_connected(peer_id):
 			var task_packet := _encode_state_packet(state)
-			receive_task_state.rpc_id(peer_id, int(task_packet[0]), task_packet[1])
+			_send_state_packet(peer_id, STATE_KIND_TASK, PackedStringArray(), task_packet)
 
 
 func _send_task_failure(player_id: String, message: String) -> void:
@@ -2043,7 +2059,7 @@ func _finish_match(winner: String, reason: String) -> void:
 		if _is_local_server_player(pid):
 			match_ended.emit(winner, reason, outcome)
 		elif _is_peer_connected(peer_id):
-			receive_match_ended.rpc_id(peer_id, winner, reason, int(packet[0]), packet[1])
+			_send_state_packet(peer_id, STATE_KIND_MATCH_END, PackedStringArray([winner, reason]), packet)
 
 
 func _rematch_for_player(player_id: String) -> void:
@@ -2205,7 +2221,7 @@ func _broadcast_lobby_state() -> void:
 		if _is_local_server_player(str(record.get("player_id", ""))):
 			lobby_state_changed.emit(state)
 		elif _is_peer_connected(peer_id):
-			receive_lobby_state.rpc_id(peer_id, int(lobby_packet[0]), lobby_packet[1])
+			_send_state_packet(peer_id, STATE_KIND_LOBBY, PackedStringArray(), lobby_packet)
 
 
 func _emit_start_failure(player_id: String, message: String) -> void:
@@ -2221,6 +2237,147 @@ func _encode_state_packet(state: Dictionary) -> Array:
 	var raw := var_to_bytes(state)
 	var compressed := raw.compress(FileAccess.COMPRESSION_ZSTD)
 	return [raw.size(), compressed]
+
+
+func _send_state_packet(peer_id: int, state_kind: int, metadata: PackedStringArray, packet: Array) -> void:
+	if not _is_peer_connected(peer_id) or packet.size() < 2:
+		return
+	var raw_size := int(packet[0])
+	var payload: PackedByteArray = packet[1]
+	if raw_size <= 0 or payload.is_empty() or payload.size() > STATE_TRANSFER_MAX_BYTES:
+		return
+	if payload.size() <= STATE_CHUNK_BYTES:
+		_send_direct_state_packet(peer_id, state_kind, metadata, raw_size, payload)
+		return
+	var transfer_id := next_state_transfer_id
+	next_state_transfer_id = 1 if next_state_transfer_id >= 2000000000 else next_state_transfer_id + 1
+	var chunk_count := ceili(float(payload.size()) / float(STATE_CHUNK_BYTES))
+	if chunk_count <= 0 or chunk_count > STATE_TRANSFER_MAX_CHUNKS:
+		return
+	log_network_event("STATE_CHUNK_SEND kind=%d peer=%d bytes=%d parts=%d" % [state_kind, peer_id, payload.size(), chunk_count])
+	for chunk_index in chunk_count:
+		var begin := chunk_index * STATE_CHUNK_BYTES
+		var end := mini(begin + STATE_CHUNK_BYTES, payload.size())
+		var chunk := payload.slice(begin, end)
+		receive_state_chunk.rpc_id(
+			peer_id, transfer_id, state_kind, metadata, raw_size,
+			payload.size(), chunk_index, chunk_count, chunk
+		)
+
+
+func _send_direct_state_packet(peer_id: int, state_kind: int, metadata: PackedStringArray, raw_size: int, payload: PackedByteArray) -> void:
+	match state_kind:
+		STATE_KIND_JOIN_SUCCESS:
+			if metadata.size() >= 1:
+				receive_join_success.rpc_id(peer_id, metadata[0], raw_size, payload)
+		STATE_KIND_LOBBY:
+			receive_lobby_state.rpc_id(peer_id, raw_size, payload)
+		STATE_KIND_MATCH_START:
+			if metadata.size() >= 1:
+				receive_match_started.rpc_id(peer_id, metadata[0], raw_size, payload)
+		STATE_KIND_TASK:
+			receive_task_state.rpc_id(peer_id, raw_size, payload)
+		STATE_KIND_PHASE4:
+			receive_phase4_state.rpc_id(peer_id, raw_size, payload)
+		STATE_KIND_MEETING:
+			receive_meeting_started.rpc_id(peer_id, raw_size, payload)
+		STATE_KIND_VOTING_RESULTS:
+			receive_voting_results.rpc_id(peer_id, raw_size, payload)
+		STATE_KIND_CHAT:
+			receive_chat_message.rpc_id(peer_id, raw_size, payload)
+		STATE_KIND_MATCH_END:
+			if metadata.size() >= 2:
+				receive_match_ended.rpc_id(peer_id, metadata[0], metadata[1], raw_size, payload)
+
+
+@rpc("authority", "call_remote", "reliable")
+func receive_state_chunk(
+	transfer_id: int,
+	state_kind: int,
+	metadata: PackedStringArray,
+	raw_size: int,
+	payload_size: int,
+	chunk_index: int,
+	chunk_count: int,
+	chunk: PackedByteArray
+) -> void:
+	if transfer_id <= 0 or raw_size <= 0 or raw_size > STATE_TRANSFER_MAX_BYTES * 8:
+		return
+	if payload_size <= 0 or payload_size > STATE_TRANSFER_MAX_BYTES:
+		return
+	if chunk_count <= 0 or chunk_count > STATE_TRANSFER_MAX_CHUNKS:
+		return
+	if chunk_index < 0 or chunk_index >= chunk_count or chunk.is_empty() or chunk.size() > STATE_CHUNK_BYTES:
+		return
+	if not incoming_state_transfers.has(transfer_id):
+		if chunk_index != 0:
+			return
+		if incoming_state_transfers.size() >= 16:
+			incoming_state_transfers.clear()
+		var empty_parts: Array = []
+		empty_parts.resize(chunk_count)
+		incoming_state_transfers[transfer_id] = {
+			"kind": state_kind,
+			"metadata": metadata.duplicate(),
+			"raw_size": raw_size,
+			"payload_size": payload_size,
+			"chunk_count": chunk_count,
+			"parts": empty_parts,
+			"received": 0
+		}
+	var transfer: Dictionary = incoming_state_transfers[transfer_id]
+	if int(transfer.get("kind", -1)) != state_kind \
+		or int(transfer.get("raw_size", -1)) != raw_size \
+		or int(transfer.get("payload_size", -1)) != payload_size \
+		or int(transfer.get("chunk_count", -1)) != chunk_count:
+		incoming_state_transfers.erase(transfer_id)
+		return
+	var parts: Array = transfer["parts"]
+	if parts[chunk_index] != null:
+		return
+	parts[chunk_index] = chunk.duplicate()
+	transfer["parts"] = parts
+	transfer["received"] = int(transfer.get("received", 0)) + 1
+	incoming_state_transfers[transfer_id] = transfer
+	if int(transfer["received"]) < chunk_count:
+		return
+	var combined := PackedByteArray()
+	for part_index in chunk_count:
+		var part = parts[part_index]
+		if not part is PackedByteArray:
+			incoming_state_transfers.erase(transfer_id)
+			return
+		combined.append_array(part)
+	incoming_state_transfers.erase(transfer_id)
+	if combined.size() != payload_size:
+		return
+	log_network_event("STATE_CHUNK_RECEIVED kind=%d bytes=%d parts=%d" % [state_kind, payload_size, chunk_count])
+	_dispatch_received_state(state_kind, transfer["metadata"], raw_size, combined)
+
+
+func _dispatch_received_state(state_kind: int, metadata: PackedStringArray, raw_size: int, payload: PackedByteArray) -> void:
+	match state_kind:
+		STATE_KIND_JOIN_SUCCESS:
+			if metadata.size() >= 1:
+				receive_join_success(metadata[0], raw_size, payload)
+		STATE_KIND_LOBBY:
+			receive_lobby_state(raw_size, payload)
+		STATE_KIND_MATCH_START:
+			if metadata.size() >= 1:
+				receive_match_started(metadata[0], raw_size, payload)
+		STATE_KIND_TASK:
+			receive_task_state(raw_size, payload)
+		STATE_KIND_PHASE4:
+			receive_phase4_state(raw_size, payload)
+		STATE_KIND_MEETING:
+			receive_meeting_started(raw_size, payload)
+		STATE_KIND_VOTING_RESULTS:
+			receive_voting_results(raw_size, payload)
+		STATE_KIND_CHAT:
+			receive_chat_message(raw_size, payload)
+		STATE_KIND_MATCH_END:
+			if metadata.size() >= 2:
+				receive_match_ended(metadata[0], metadata[1], raw_size, payload)
 
 
 func _decode_state_packet(raw_size: int, payload: PackedByteArray) -> Dictionary:

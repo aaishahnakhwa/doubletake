@@ -5,6 +5,7 @@ signal bell_clicked
 signal ring_started
 signal ring_finished
 
+const AudioManagerScript = preload("res://scripts/audio_manager.gd")
 const CLICK_RADIUS := 65.0
 
 var is_ringing := false
@@ -65,6 +66,7 @@ func ring(duration: float = 1.2) -> void:
 	is_ringing = true
 	ring_duration = duration
 	ring_timer = duration
+	_play_sfx(&"bell", -1.5)
 	play("ring")
 	ring_started.emit()
 
@@ -83,3 +85,20 @@ func stop_ringing() -> void:
 	play("idle")
 	frame = 0
 	ring_finished.emit()
+
+
+func _play_sfx(effect_name: StringName, volume_db: float = 0.0, pitch_scale: float = 1.0) -> void:
+	var audio_manager := _ensure_audio_manager()
+	if audio_manager != null:
+		audio_manager.call("play_sfx", effect_name, volume_db, pitch_scale)
+
+
+func _ensure_audio_manager() -> Node:
+	if get_tree() == null:
+		return null
+	var audio_manager := get_tree().root.get_node_or_null("AudioManager")
+	if audio_manager == null:
+		audio_manager = AudioManagerScript.new()
+		audio_manager.name = "AudioManager"
+		get_tree().root.add_child(audio_manager)
+	return audio_manager

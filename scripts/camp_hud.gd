@@ -13,6 +13,7 @@ signal return_to_lobby_requested
 
 const MiniMapScript = preload("res://scripts/camp_minimap.gd")
 const JoystickScript = preload("res://scripts/touch_joystick.gd")
+const AudioManagerScript = preload("res://scripts/audio_manager.gd")
 const TASK_ZONES := {
 	"firewood": "Forest Trail",
 	"generator": "Workshop",
@@ -43,6 +44,7 @@ var task_assignments: Array = []
 var shared_completed := 0
 var shared_total := 0
 var phase4_state: Dictionary = {}
+var known_body_count := -1
 var nearby_body := false
 var nearby_emergency_button := false
 var kill_cooldown_remaining := 0.0
@@ -91,6 +93,7 @@ var leave_cancel_btn: Button
 
 
 func _ready() -> void:
+	_ensure_audio_manager()
 	blackout_overlay = ColorRect.new()
 	blackout_overlay.color = Color("#02070d", 0.52)
 	blackout_overlay.mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -483,6 +486,7 @@ func show_emergency_confirm_dialog() -> void:
 
 func _on_confirm_meeting() -> void:
 	if is_instance_valid(confirm_bell_anim):
+		_play_sfx(&"ui_confirm", -4.0)
 		confirm_title.text = "🔔 THE BELL CHIMES!"
 		confirm_body.text = "The camp bell rings loudly across the woods... Calling all campers!"
 		if is_instance_valid(confirm_btn_row):
@@ -927,6 +931,14 @@ func _refresh_camper_task_display() -> void:
 
 
 func set_phase4_state(state: Dictionary) -> void:
+	var incoming_role := str(state.get("role", ""))
+	var incoming_bodies: Array = state.get("bodies", [])
+	var incoming_body_count := incoming_bodies.size()
+	if incoming_role == "Killer" and known_body_count >= 0 and incoming_body_count > known_body_count:
+		# Body count rises only after the server confirms a successful kill. This
+		# gives the killer local feedback without changing RPC/session code.
+		_play_sfx(&"killer_confirm", -1.5)
+	known_body_count = incoming_body_count
 	phase4_state = state.duplicate(true)
 	if _is_living_killer():
 		kill_cooldown_remaining = maxf(0.0, float(phase4_state.get("kill_cooldown", 0.0)))
@@ -1104,3 +1116,20 @@ func show_ringing_bell_cinematic(duration: float = 1.2) -> void:
 	tween.tween_interval(duration)
 	tween.tween_property(cinematic, "modulate:a", 0.0, 0.2)
 	tween.tween_callback(cinematic.queue_free)
+
+
+func _play_sfx(effect_name: StringName, volume_db: float = 0.0, pitch_scale: float = 1.0) -> void:
+	var audio_manager := _ensure_audio_manager()
+	if audio_manager != null:
+		audio_manager.call("play_sfx", effect_name, volume_db, pitch_scale)
+
+
+func _ensure_audio_manager() -> Node:
+	if get_tree() == null:
+		return null
+	var audio_manager := get_tree().root.get_node_or_null("AudioManager")
+	if audio_manager == null:
+		audio_manager = AudioManagerScript.new()
+		audio_manager.name = "AudioManager"
+		get_tree().root.add_child(audio_manager)
+	return audio_manager

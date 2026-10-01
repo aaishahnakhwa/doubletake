@@ -4,6 +4,7 @@ signal completed(task_id: String)
 signal closed
 
 const TaskCatalog = preload("res://scripts/task_catalog.gd")
+const AudioManagerScript = preload("res://scripts/audio_manager.gd")
 
 
 class DraggableItemButton:
@@ -168,6 +169,7 @@ var sabotage_buttons: Array[Button] = []
 
 func _ready() -> void:
 	layer = 40
+	_ensure_audio_manager()
 	_build_shell()
 	_build_task()
 	get_viewport().size_changed.connect(_layout)
@@ -461,6 +463,7 @@ func _build_targets() -> void:
 func _target_pressed(button: Button) -> void:
 	if button.disabled or finished:
 		return
+	_play_sfx(&"task_action", -5.0)
 	_set_item_caption(button, "TOSSED!")
 	_animate_item_transfer(button, primary_target_visual)
 	_emit_action_burst(primary_target_visual, "✦", Color("#a7c957"))
@@ -523,9 +526,11 @@ func _sequence_pressed(button: Button, order: int) -> void:
 	if finished:
 		return
 	if order != next_sequence:
+		_play_sfx(&"task_error", -4.0)
 		status_label.text = "Not yet — use step %d first" % (next_sequence + 1)
 		_wiggle_control(button, Color("#ff8c74"))
 		return
+	_play_sfx(&"task_action", -5.0, 1.0 + float(next_sequence) * 0.06)
 	_animate_sequence_action(button, order)
 	next_sequence += 1
 	progress.value = 100.0 * float(next_sequence) / float(remaining)
@@ -600,6 +605,7 @@ func _matching_dropped(data: Dictionary, destination: int = -1) -> void:
 	if destination < 0:
 		destination = matching_stage
 	if order < 0 or order >= items.size() or destination != order:
+		_play_sfx(&"task_error", -4.0)
 		var correct_destination := str(destinations[order]) if order >= 0 and order < destinations.size() else "another place"
 		status_label.text = "That doesn't fit — %s belongs at %s" % [str(items[order]) if order >= 0 and order < items.size() else "that item", correct_destination]
 		var wrong_button = data.get("button")
@@ -607,6 +613,7 @@ func _matching_dropped(data: Dictionary, destination: int = -1) -> void:
 			_wiggle_control(wrong_button, Color("#ff8c74"))
 		return
 	matching_stage_busy = true
+	_play_sfx(&"task_action", -5.0, 1.08)
 	var button = data.get("button")
 	if button is Button and not button.disabled:
 		_set_item_caption(button, "PUT AWAY!")
@@ -970,6 +977,7 @@ func _hammer_drop(data: Dictionary, index: int) -> void:
 func _hammer_hit(index: int) -> void:
 	if finished or index < 0 or index >= hammer_nail_zones.size() or not hammer_nail_zones[index].accepting:
 		return
+	_play_sfx(&"impact", -7.0, 1.35)
 	hammer_nail_hits[index] += 1
 	var hits_left := hammer_hits_required - hammer_nail_hits[index]
 	_animate_hammer_impact(hammer_nail_zones[index])
@@ -1148,6 +1156,7 @@ func _finish() -> void:
 	if finished:
 		return
 	finished = true
+	_play_sfx(&"task_success", -2.5)
 	hold_active = false
 	progress.value = 100.0
 	status_label.text = "SABOTAGE COMPLETE" if is_sabotage_task else ("SYSTEM REPAIRED" if is_repair_task else "TASK COMPLETE")
@@ -1787,3 +1796,20 @@ func _label(value: String, font_size: int, tint: Color) -> Label:
 	label.add_theme_font_size_override("font_size", font_size)
 	label.add_theme_color_override("font_color", tint)
 	return label
+
+
+func _play_sfx(effect_name: StringName, volume_db: float = 0.0, pitch_scale: float = 1.0) -> void:
+	var audio_manager := _ensure_audio_manager()
+	if audio_manager != null:
+		audio_manager.call("play_sfx", effect_name, volume_db, pitch_scale)
+
+
+func _ensure_audio_manager() -> Node:
+	if get_tree() == null:
+		return null
+	var audio_manager := get_tree().root.get_node_or_null("AudioManager")
+	if audio_manager == null:
+		audio_manager = AudioManagerScript.new()
+		audio_manager.name = "AudioManager"
+		get_tree().root.add_child(audio_manager)
+	return audio_manager

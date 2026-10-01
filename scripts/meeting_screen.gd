@@ -5,6 +5,7 @@ signal vote_cast(target_player_id: String)
 signal leave_match_requested
 signal return_to_lobby_requested
 
+const AudioManagerScript = preload("res://scripts/audio_manager.gd")
 const BODY_TEXTURES := [
 	preload("res://assets/phase4/bodies/orange.png"),
 	preload("res://assets/phase4/bodies/blue.png"),
@@ -115,6 +116,7 @@ func setup(data: Dictionary, current_player_id: String = "", host_mode: bool = f
 
 func _ready() -> void:
 	layer = 70
+	_ensure_audio_manager()
 	root = Control.new()
 	root.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	add_child(root)
@@ -878,10 +880,12 @@ func _on_card_clicked(pid: String) -> void:
 
 func _select_card(pid: String) -> void:
 	if selected_card_id == pid:
+		_play_sfx(&"ui_cancel", -5.0)
 		_deselect_card()
 		return
 	_deselect_card()
 	selected_card_id = pid
+	_play_sfx(&"ui_select", -5.0)
 	if card_entries.has(pid):
 		card_entries[pid]["sel_border"].visible = true
 		if card_entries[pid].has("vote_action_btn") and is_instance_valid(card_entries[pid]["vote_action_btn"]):
@@ -907,6 +911,7 @@ func _confirm_vote(pid: String) -> void:
 		return
 	local_voted = true
 	local_vote_target = pid
+	_play_sfx(&"ui_confirm", -3.0)
 	_deselect_card()
 	
 	for cid in card_entries:
@@ -929,6 +934,7 @@ func _on_skip_clicked() -> void:
 		return
 	_deselect_card()
 	skip_confirm_box.visible = not skip_confirm_box.visible
+	_play_sfx(&"ui_select" if skip_confirm_box.visible else &"ui_cancel", -5.0)
 
 
 func _on_skip_confirmed() -> void:
@@ -936,6 +942,7 @@ func _on_skip_confirmed() -> void:
 		return
 	local_voted = true
 	local_vote_target = "skip"
+	_play_sfx(&"ui_confirm", -3.0)
 	_deselect_card()
 	
 	for cid in card_entries:
@@ -972,6 +979,7 @@ func _update_vote_progress_label() -> void:
 
 
 func show_voting_results(results: Dictionary) -> void:
+	_play_sfx(&"vote_tally", -2.0)
 	in_results_phase = true
 	waiting_for_results = false
 	showing_outcome = false
@@ -1038,6 +1046,7 @@ func _show_outcome_overlay(results: Dictionary) -> void:
 	if not is_instance_valid(outcome_overlay):
 		return
 	outcome_overlay.visible = true
+	_play_sfx(&"vote_outcome", -2.0)
 	
 	var o_type: String = str(results.get("outcome_type", "none"))
 	var ename: String = str(results.get("ejected_name", "Camper"))
@@ -1198,3 +1207,20 @@ func _layout() -> void:
 		var ld_h := minf(vp_size.y * 0.45, 230.0 * scale_factor)
 		leave_dialog.size = Vector2(ld_w, ld_h)
 		leave_dialog.position = Vector2((vp_size.x - ld_w) * 0.5, (vp_size.y - ld_h) * 0.5)
+
+
+func _play_sfx(effect_name: StringName, volume_db: float = 0.0, pitch_scale: float = 1.0) -> void:
+	var audio_manager := _ensure_audio_manager()
+	if audio_manager != null:
+		audio_manager.call("play_sfx", effect_name, volume_db, pitch_scale)
+
+
+func _ensure_audio_manager() -> Node:
+	if get_tree() == null:
+		return null
+	var audio_manager := get_tree().root.get_node_or_null("AudioManager")
+	if audio_manager == null:
+		audio_manager = AudioManagerScript.new()
+		audio_manager.name = "AudioManager"
+		get_tree().root.add_child(audio_manager)
+	return audio_manager
